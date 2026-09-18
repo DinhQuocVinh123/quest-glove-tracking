@@ -1,60 +1,62 @@
-# Theo dõi găng tay haptic bằng camera của Quest 3
+# Quest 3 Haptic Glove Hand Tracking
 
-Bộ công cụ **dùng lại được**: cắm vào bất kỳ dự án Unity nào cho Quest 3 để có ngay
-khả năng theo dõi bàn tay đeo găng haptic — không cần webcam hay camera rời.
+A **drop-in module** that adds gloved-hand joint tracking to any Unity project for
+Quest 3 — using only the headset's own passthrough camera. No external webcam needed.
 
-Camera passthrough của kính gửi hình về máy tính, máy tính chạy mạng nhận diện khớp
-tay (RTMPose), rồi gửi ngược 21 điểm khớp về kính để điều khiển bàn tay ảo.
+Quest's built-in hand tracking fails once you wear a haptic glove. This restores it:
+the headset streams passthrough frames to a PC, the PC runs a hand-pose network
+(RTMPose), and sends the 21 joint positions back to drive the virtual hand.
 
-## Luồng hoạt động
+## How it works
 
 ```
-        KÍNH QUEST 3                          MÁY TÍNH (cần GPU NVIDIA)
+         QUEST 3                                PC (needs an NVIDIA GPU)
    ┌─────────────────────┐                  ┌──────────────────────────┐
-   │ GloveLiveStreamer   │  ảnh JPEG, TCP   │ run_glove_quest_stream   │
-   │ (camera passthrough)├─────────────────>│  • tìm bàn tay           │
-   │                     │   cổng 5007      │  • chạy RTMPose          │
-   │                     │                  │  • lọc kết quả sai       │
-   │ FingerUDPReceiver   │  21 điểm, UDP    │                          │
-   │ (xoay xương tay ảo) │<─────────────────┤                          │
-   └─────────────────────┘   cổng 5005      └──────────────────────────┘
+   │ GloveLiveStreamer   │   JPEG over TCP  │ run_glove_quest_stream   │
+   │ (passthrough camera)├─────────────────>│  • locate the hand       │
+   │                     │     port 5007    │  • run RTMPose           │
+   │                     │                  │  • reject bad detections │
+   │ FingerUDPReceiver   │  21 pts over UDP │                          │
+   │ (drives hand bones) │<─────────────────┤                          │
+   └─────────────────────┘     port 5005    └──────────────────────────┘
                                    ▲
-                    kính TỰ TÌM máy tính qua tín hiệu phát
-                    trên cổng UDP 5008 — không cần điền IP
+                    the headset DISCOVERS the PC via a beacon
+                    broadcast on UDP 5008 — no IP to configure
 ```
 
-Việc tự tìm này có chủ đích: đổi mạng, đổi hotspot, IP thay đổi — không phải sửa
-gì và không phải build lại. Nó chỉ chạy lúc kết nối, sau đó nằm ngoài đường truyền
-dữ liệu nên **không thêm độ trễ** cho mỗi khung hình.
+Auto-discovery is deliberate: switch networks, switch hotspots, get a new IP — nothing
+to edit and no rebuild. It runs only at connection time and then sits outside the data
+path, so it **adds no per-frame latency**.
 
 ---
 
-# Cắm vào một dự án Unity mới
+# Adding this to a Unity project
 
-### Điều kiện cần
+### Prerequisites
 
-- **Quest 3 hoặc 3S**, Horizon OS **v74 trở lên** (API camera passthrough chỉ có từ đây)
-- Dự án Unity đã có **Meta XR SDK** và bật **hand tracking**
-- Một **model bàn tay 3D** có xương đặt tên theo chuẩn `XRHand_*`
-  (ví dụ `XRHand_IndexProximal`, `XRHand_ThumbMetacarpal`) — model tay sẵn có của
-  Meta XR SDK đã đúng chuẩn này
-- Máy tính có **GPU NVIDIA**, cùng mạng với kính
+- **Quest 3 or 3S** running Horizon OS **v74 or newer** (the passthrough camera API
+  does not exist before that)
+- A Unity project with the **Meta XR SDK** and hand tracking enabled
+- A **hand model** whose bones follow the `XRHand_*` naming convention
+  (e.g. `XRHand_IndexProximal`, `XRHand_ThumbMetacarpal`) — the hand model shipped
+  with the Meta XR SDK already matches
+- A PC with an **NVIDIA GPU**, on the same network as the headset
 
-### Bước 1 — Chép 3 file C#
+### Step 1 — Copy three C# files
 
-Chép từ `unity/` vào `Assets/Scripts/` của dự án mới:
+Copy these from `unity/` into your project's `Assets/Scripts/`:
 
-| File | Việc |
+| File | Role |
 |---|---|
-| `GloveLiveStreamer.cs` | Gửi hình từ camera passthrough về máy tính |
-| `FingerUDPReceiver.cs` | Nhận 21 điểm, xoay xương bàn tay ảo |
-| `HandFingerRig.cs` | Tự tìm các xương ngón theo tên `XRHand_*` |
+| `GloveLiveStreamer.cs` | Streams passthrough camera frames to the PC |
+| `FingerUDPReceiver.cs` | Receives the 21 points and rotates the hand bones |
+| `HandFingerRig.cs` | Finds the finger bones by their `XRHand_*` names |
 
-(`GloveDatasetCollector.cs` chỉ cần nếu bạn muốn thu thêm dữ liệu huấn luyện.)
+(`GloveDatasetCollector.cs` is only needed if you want to capture training data.)
 
-### Bước 2 — Xin quyền dùng camera
+### Step 2 — Request camera permission
 
-Thêm vào `Assets/Plugins/Android/AndroidManifest.xml`:
+Add to `Assets/Plugins/Android/AndroidManifest.xml`:
 
 ```xml
 <manifest ... xmlns:horizonos="http://schemas.horizonos/sdk">
@@ -62,128 +64,133 @@ Thêm vào `Assets/Plugins/Android/AndroidManifest.xml`:
   <uses-permission android:name="horizonos.permission.HEADSET_CAMERA" />
 ```
 
-Thiếu bước này thì camera sẽ không bao giờ khởi động được.
+Without this the camera will never start.
 
-### Bước 3 — Dựng scene
+### Step 3 — Wire up the scene
 
-**a) Object gửi hình:** tạo một GameObject trống, gắn `GloveLiveStreamer`, rồi kéo
-component `PassthroughCameraAccess` (đang bật, đang chạy) vào ô `Passthrough Camera`.
+**a) The streamer:** create an empty GameObject, add `GloveLiveStreamer`, and drag your
+running `PassthroughCameraAccess` component into the `Passthrough Camera` field.
 
-Để nguyên `Use Auto Discovery` đã tích sẵn — khi đó ô IP bên dưới không cần điền.
+Leave `Use Auto Discovery` ticked — the IP field below it is then unused.
 
-**b) Bàn tay ảo:** trên GameObject chứa model bàn tay, gắn `FingerUDPReceiver`
-(`HandFingerRig` sẽ tự được thêm vào). Nếu object có component `Hand Visual`, kéo nó
-vào ô cùng tên để tránh tranh chấp với hand tracking gốc của Quest.
+**b) The virtual hand:** add `FingerUDPReceiver` to the GameObject holding your hand
+model (`HandFingerRig` is added automatically). If that object has a `Hand Visual`
+component, drag it into the matching field so this script doesn't fight Quest's own
+hand tracking.
 
-> **Quan trọng:** object bàn tay nên là **con của `CenterEyeAnchor`**. Camera gắn trên
-> đầu nên di chuyển theo đầu, vì vậy toạ độ phải tính tương đối với đầu.
+> **Important:** the hand object should be a **child of `CenterEyeAnchor`**. The camera
+> is head-mounted and moves with your head, so coordinates must be head-relative.
 
-`HandFingerRig` tự tìm xương theo tên, thường không phải kéo thả gì thêm.
+`HandFingerRig` locates bones by name, so there is usually nothing else to assign.
 
-### Bước 4 — Cài môi trường Python
+### Step 4 — Set up the Python environment
 
-Xem `requirements.txt` — **phải cài đúng thứ tự trong đó**, không chạy
-`pip install -r` một phát được. Bộ thư viện OpenMMLab rất kén phiên bản.
+See `requirements.txt` — **follow the install order given there**. A plain
+`pip install -r requirements.txt` will not work; the OpenMMLab packages are strict
+about versions and install order.
 
-Rồi clone mmpose vào **ngay cạnh** các file `.py`:
+Then clone mmpose **next to** the `.py` files:
 
 ```bash
 git clone https://github.com/open-mmlab/mmpose.git
 ```
 
-### Bước 5 — Chạy
+### Step 5 — Run
 
 ```bash
-# Máy tính chạy TRƯỚC, rồi mới mở app trên kính:
+# Start the PC first, then launch the app on the headset:
 python run_glove_quest_stream.py --original
 ```
 
-Cửa sổ debug sẽ hiện backbone bàn tay kèm số liệu chẩn đoán (FPS, độ tin cậy, lý do
-loại khung hình...). Model gốc **tự tải về** lần chạy đầu, không cần chuẩn bị gì.
+A debug window shows the detected hand skeleton plus diagnostics (FPS, confidence,
+why a frame was rejected, and so on). The base model **downloads itself** on first run.
 
-**Nếu không kết nối được:** kính và máy tính phải cùng mạng, và mạng đó không được
-chặn thiết bị nói chuyện trực tiếp với nhau. Mạng công ty hay chặn kiểu này —
-hotspot điện thoại là phương án chắc ăn nhất.
-
----
-
-## Giao thức (nếu cần thay thế một nửa)
-
-**Kính → máy tính, TCP cổng 5007:** lặp lại `[4 byte độ dài, big-endian][ảnh JPEG]`
-
-**Máy tính → kính, UDP cổng 5005:** chuỗi văn bản `khóa:giá_trị` cách nhau bằng dấu phẩy
-
-| Khóa | Ý nghĩa |
-|---|---|
-| `valid` | `1` = dữ liệu tin được, `0` = tay ảo nên về tư thế nghỉ |
-| `pts` | 21 điểm `x\|y;x\|y;...`, gốc toạ độ tại cổ tay, chia theo chiều dài lòng bàn tay, `+y` hướng lên |
-| `pinch` | 0..1, khoảng cách 2 đầu ngón cái–trỏ |
-| `thumb0/1/2`, `index0/1/2` | Góc cong từng khớp (gốc/giữa/đầu) |
-
-**Thứ tự 21 điểm:** `0` cổ tay, `1-4` ngón cái, `5-8` trỏ, `9-12` giữa, `13-16` áp út,
-`17-20` út. Mỗi ngón đi từ khớp gốc ra đầu ngón.
+**If it won't connect:** the headset and PC must be on the same network, and that
+network must allow devices to talk to each other directly. Corporate networks often
+block this — a phone hotspot is the most reliable option.
 
 ---
 
-## Các file Python
+## Protocol (if you want to replace either half)
 
-**Đường chạy chính:**
+**Headset → PC, TCP port 5007:** repeating `[4-byte big-endian length][JPEG image]`
 
-| File | Việc |
+**PC → headset, UDP port 5005:** comma-separated `key:value` text
+
+| Key | Meaning |
 |---|---|
-| `run_glove_quest_stream.py` | **Script chính.** Camera kính → máy tính → Unity |
-| `run_glove_to_unity.py` | Bản dùng webcam thay cho camera kính |
-| `run_white_haptics_glove.py` | Xem thử trên máy tính, không cần đeo kính |
-| `dataset_receiver.py` | Nhận mẫu huấn luyện từ `GloveDatasetCollector.cs` |
+| `valid` | `1` = data is trustworthy, `0` = return the virtual hand to its rest pose |
+| `pts` | 21 points as `x\|y;x\|y;...`, origin at the wrist, scaled by palm length, `+y` is up |
+| `pinch` | 0..1, distance between thumb and index tips |
+| `thumb0/1/2`, `index0/1/2` | Per-joint bend angles (base / middle / tip) |
 
-**Công cụ làm dữ liệu / huấn luyện:**
-`manual_label_quest.py` (dán nhãn tay), `review_quest_import.py`, `review_dataset.py`,
+**Point order:** `0` wrist, `1-4` thumb, `5-8` index, `9-12` middle, `13-16` ring,
+`17-20` little. Each finger runs from its base joint out to the fingertip.
+
+---
+
+## The Python files
+
+**Main pipeline:**
+
+| File | Role |
+|---|---|
+| `run_glove_quest_stream.py` | **The main script.** Headset camera → PC → Unity |
+| `run_glove_to_unity.py` | Webcam variant, same pipeline |
+| `run_white_haptics_glove.py` | Local preview on the PC, no headset required |
+| `dataset_receiver.py` | Receives training samples from `GloveDatasetCollector.cs` |
+
+**Dataset and training tools:**
+`manual_label_quest.py` (hand labelling), `review_quest_import.py`, `review_dataset.py`,
 `import_quest_dataset.py`, `run_split_screen_finetune.py`, `finetune_glove.py`
 
-Các file `run_*.py` còn lại là thử nghiệm cũ, giữ để tham khảo, **không thuộc đường
-chạy hiện tại**.
+The remaining `run_*.py` files are older experiments, kept for reference. They are
+**not part of the current pipeline**.
 
-> Tất cả file `.py` phải nằm **cùng một cấp thư mục** — chúng tìm `mmpose/` và
-> `dataset/` theo đường dẫn tương đối so với chính nó.
+> All `.py` files must stay **in the same directory** — they locate `mmpose/` and
+> `dataset/` relative to their own location.
 
 ---
 
-## Vì sao có cờ `--original`
+## Why `--original`
 
-Cờ này bắt dùng model **gốc** thay vì bản đã fine-tune. Nghe ngược đời, nhưng khi so
-sánh trực tiếp, bản gốc bám ngón cái/trỏ **ổn định hơn hẳn** bản fine-tune trên 170
-mẫu tự thu. Nguyên nhân nhiều khả năng là bộ dữ liệu còn quá nhỏ và thiếu đa dạng,
-khiến fine-tune làm hỏng khả năng khái quát vốn có của model gốc.
+This flag forces the **stock pretrained** model instead of our fine-tuned one. That
+sounds backwards, but in a direct comparison the stock model tracked thumb and index
+**noticeably more stably** than a version fine-tuned on our own 170 samples. The likely
+cause is that the dataset was too small and not varied enough, so fine-tuning eroded the
+generalisation the base model already had.
 
-Bỏ cờ đi thì script dùng `checkpoints/rtmpose_glove_finetuned.pth` nếu file đó tồn tại.
+Drop the flag and the script will use `checkpoints/rtmpose_glove_finetuned.pth` if present.
 
-## Vài điều đã học được (để khỏi giẫm lại)
+## Lessons learned (so you don't repeat them)
 
-- **Kính gửi nhanh hơn máy tính xử lý.** TCP không vứt dữ liệu mà xếp hàng, nên khung
-  hình cũ dồn lại và độ trễ **tăng dần** tới 1–2 giây. `LatestFrameReader` luôn vứt
-  khung cũ, chỉ xử lý khung mới nhất.
+- **The headset sends faster than the PC can process.** TCP never drops data — it
+  queues. Stale frames pile up and latency **grows over time**, reaching 1–2 seconds.
+  `LatestFrameReader` always discards the backlog and processes only the newest frame.
 
-- **Model cần được chỉ chỗ để nhìn.** RTMPose thuộc loại "top-down": nó không tự dò cả
-  ảnh mà phải được đưa sẵn một khung. Nếu chỉ đưa vài vùng cố định thì đưa tay ra rìa
-  khung hình là mất dấu hoàn toàn. Hiện dùng lưới quét phủ kín toàn khung, luân phiên
-  từng phần qua các khung hình để không tụt FPS.
+- **The model has to be told where to look.** RTMPose is top-down: it does not scan the
+  image, it is handed a box. Searching only a few fixed regions means the hand vanishes
+  the moment you move it to the edge of the frame. The current code sweeps a grid
+  covering the whole frame, a few cells per frame so the frame rate doesn't collapse.
 
-- **Lọc theo hình dạng, đừng chỉ tin điểm số.** Model chưa từng học chiếc găng này nên
-  độ tin cậy luôn sát ngưỡng; nền rối là tụt xuống dưới. Cách đáng tin hơn là kiểm tra
-  hình dạng có giống bàn tay không (chiều dài từng đốt, tổng chiều dài ngón, có nhảy
-  đột ngột giữa 2 khung không).
+- **Filter on shape, not just on score.** The model has never seen this glove, so its
+  confidence always sits near the threshold and a cluttered background pushes it under.
+  Checking whether the result actually *looks* like a hand (bone lengths, total finger
+  length, sudden jumps between frames) is far more reliable.
 
-- **Đừng đặt ngưỡng bằng pixel tuyệt đối.** Camera gắn trên đầu nên tay có thể sát ngay
-  trước mặt và nhìn nghiêng, lúc đó các khớp chồng lên nhau khi chiếu xuống ảnh 2D.
-  Ngưỡng pixel viết cho webcam để bàn sẽ loại oan chính những khung hình tốt.
+- **Never threshold on absolute pixel distances.** With a head-mounted camera the hand
+  can be right in front of your face and seen edge-on, which collapses the joints on top
+  of each other in 2D. Pixel thresholds written for a desktop webcam will reject exactly
+  the good frames.
 
-- **Xoay xương theo hướng backbone, đừng xoay quanh một trục cố định.** Ngón tay thật
-  cong trong mặt phẳng bất kỳ. Xoay mỗi khớp quanh một trục chọn sẵn thì dù tính góc
-  chuẩn đến đâu, hình dạng cũng không bao giờ khớp.
+- **Aim each bone along the backbone; don't rotate about a fixed axis.** Real fingers
+  bend in arbitrary planes. Rotating each joint about one preselected axis can never
+  reproduce the shape, no matter how accurate the angle.
 
-- **Muốn pinch khép được thì 2 ngón phải cùng mặt phẳng.** Nếu giữ nguyên chiều sâu tư
-  thế nghỉ, ngón cái luôn chĩa về phía người nhìn nên không bao giờ chạm được ngón trỏ
-  (`Preserve Rest Depth` phải để TẮT).
+- **Pinch only closes if both fingers share a plane.** Keeping each bone's rest-pose
+  depth leaves the thumb permanently angled toward the viewer, so it can never meet the
+  index finger (`Preserve Rest Depth` must be OFF).
 
-- **3 ngón giữa/áp út/út bị chính bàn tay che khi pinch**, model đoán rất bậy. Python
-  tự ép chúng về dáng nắm khi đang pinch, thay vì tin model.
+- **The middle, ring and little fingers are occluded by the hand itself during a pinch**,
+  and the model guesses wildly there. The Python side forces them into a closed pose
+  while pinching rather than trusting the model.

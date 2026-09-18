@@ -1,21 +1,22 @@
-# Moi truong da chay duoc thuc te: Windows 10, Python 3.11.9, GPU NVIDIA CUDA 12.1.
+# Known-good environment: Windows 10, Python 3.11.9, NVIDIA GPU with CUDA 12.1.
 #
-# QUAN TRONG: KHONG cai bang "pip install -r requirements.txt" mot phat duoc.
-# Bo mmXXX cua OpenMMLab rat kho tinh ve thu tu cai va phien ban -- phai cai
-# dung trinh tu duoi day. Cac phien ban duoc ghim vi day la to hop THUC SU
-# chay duoc; doi bat ky cai nao cung de vo.
+# IMPORTANT: do NOT install this with a single "pip install -r requirements.txt".
+# The OpenMMLab packages are strict about both versions and install order, so
+# follow the steps below. These versions are pinned because this is the exact
+# combination that actually works -- changing any one of them tends to break it.
 
-# --- Buoc 1: PyTorch ban CUDA (phai cai TRUOC TIEN) -------------------------
+# --- Step 1: PyTorch with CUDA (must come first) ----------------------------
 # pip install torch==2.1.0+cu121 torchvision==0.16.0+cu121 \
 #     --index-url https://download.pytorch.org/whl/cu121
 torch==2.1.0+cu121
 torchvision==0.16.0+cu121
 
-# --- Buoc 2: numpy PHAI la ban 1.x ------------------------------------------
-# numpy 2.x lam vo mmcv va chumpy. Cai o day de cac goi sau khong keo numpy 2 ve.
+# --- Step 2: numpy MUST stay on 1.x -----------------------------------------
+# numpy 2.x breaks mmcv and chumpy. Install it here so later packages don't
+# pull numpy 2 in behind your back.
 numpy==1.26.4
 
-# --- Buoc 3: bo OpenMMLab (cai qua mim, KHONG dung pip truc tiep) -----------
+# --- Step 3: the OpenMMLab stack (install via mim, not pip directly) --------
 # pip install -U openmim
 # mim install mmengine==0.10.7
 # mim install "mmcv==2.1.0"
@@ -24,16 +25,16 @@ mmengine==0.10.7
 mmcv==2.1.0
 mmdet==3.3.0
 
-# --- Buoc 4: mmpose cai o che do editable tu ma nguon -----------------------
+# --- Step 4: mmpose, installed editable from source -------------------------
 # git clone https://github.com/open-mmlab/mmpose.git
 # cd mmpose && pip install -r requirements.txt && pip install -v -e .
 #
-# LUU Y VE DUONG DAN: thu muc mmpose/ phai nam NGAY CANH cac file .py nay, vi
-# code tro toi file config theo duong dan tuong doi:
+# PATH NOTE: the mmpose/ directory must sit NEXT TO these .py files, because
+# the code resolves its config file by relative path:
 #     mmpose/configs/hand_2d_keypoint/rtmpose/hand5/...
-# Repo nay khong kem theo mmpose vi no nang ~98 MB va la ma nguon cong khai.
+# mmpose is not vendored here: it is ~98 MB and is public source anyway.
 
-# --- Buoc 5: con lai --------------------------------------------------------
+# --- Step 5: everything else ------------------------------------------------
 opencv-python==4.9.0.80
 chumpy==0.70
 xtcocotools==1.14.3
