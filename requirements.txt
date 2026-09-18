@@ -1,0 +1,39 @@
+# Moi truong da chay duoc thuc te: Windows 10, Python 3.11.9, GPU NVIDIA CUDA 12.1.
+#
+# QUAN TRONG: KHONG cai bang "pip install -r requirements.txt" mot phat duoc.
+# Bo mmXXX cua OpenMMLab rat kho tinh ve thu tu cai va phien ban -- phai cai
+# dung trinh tu duoi day. Cac phien ban duoc ghim vi day la to hop THUC SU
+# chay duoc; doi bat ky cai nao cung de vo.
+
+# --- Buoc 1: PyTorch ban CUDA (phai cai TRUOC TIEN) -------------------------
+# pip install torch==2.1.0+cu121 torchvision==0.16.0+cu121 \
+#     --index-url https://download.pytorch.org/whl/cu121
+torch==2.1.0+cu121
+torchvision==0.16.0+cu121
+
+# --- Buoc 2: numpy PHAI la ban 1.x ------------------------------------------
+# numpy 2.x lam vo mmcv va chumpy. Cai o day de cac goi sau khong keo numpy 2 ve.
+numpy==1.26.4
+
+# --- Buoc 3: bo OpenMMLab (cai qua mim, KHONG dung pip truc tiep) -----------
+# pip install -U openmim
+# mim install mmengine==0.10.7
+# mim install "mmcv==2.1.0"
+# mim install "mmdet==3.3.0"
+mmengine==0.10.7
+mmcv==2.1.0
+mmdet==3.3.0
+
+# --- Buoc 4: mmpose cai o che do editable tu ma nguon -----------------------
+# git clone https://github.com/open-mmlab/mmpose.git
+# cd mmpose && pip install -r requirements.txt && pip install -v -e .
+#
+# LUU Y VE DUONG DAN: thu muc mmpose/ phai nam NGAY CANH cac file .py nay, vi
+# code tro toi file config theo duong dan tuong doi:
+#     mmpose/configs/hand_2d_keypoint/rtmpose/hand5/...
+# Repo nay khong kem theo mmpose vi no nang ~98 MB va la ma nguon cong khai.
+
+# --- Buoc 5: con lai --------------------------------------------------------
+opencv-python==4.9.0.80
+chumpy==0.70
+xtcocotools==1.14.3

@@ -1,0 +1,21 @@
+# Ma nguon mmpose (~98 MB) -- clone tu repo cong khai, xem README.md
+mmpose/
+
+# Moi truong ao Python (~5.8 GB) -- tao lai theo requirements.txt
+mmpose_venv/
+venv/
+.venv/
+
+# Du lieu huan luyen va model da train (nang)
+dataset/
+dataset_from_quest/
+checkpoints/
+*.pth
+
+# Python
+__pycache__/
+*.pyc
+
+# File tam luc chay
+live_snapshot.jpg
+glove_config.json
