@@ -183,6 +183,24 @@ Drop the flag and the script will use `checkpoints/rtmpose_glove_finetuned.pth` 
   of each other in 2D. Pixel thresholds written for a desktop webcam will reject exactly
   the good frames.
 
+- **Search boxes need several sizes, not one.** If every box is smaller than the hand,
+  each one contains only part of it — and a top-down model will still cram all 21 joints
+  into that fragment, collapsing them into a cluster while reporting *high* confidence.
+  Telltale symptom: "palm length = 0 px" while the hand fills half the frame.
+
+- **Also check the hand's size relative to the frame.** Every other check compares the
+  skeleton against itself, so a perfectly proportioned *tiny* hand passes all of them.
+  That lets the tracker lock onto some small detail (a module on the glove, a mark on a
+  monitor) and stay locked, since the tracked box then keeps following it. The camera is
+  head-mounted and the hand is attached to the wearer's arm, so there is a hard floor on
+  how small it can plausibly appear.
+
+- **Hold the last good pose for a moment before giving up.** On cluttered backgrounds the
+  model's confidence fluctuates and dips below threshold for a frame or two at a time.
+  Declaring "invalid" instantly makes the virtual hand flicker between the real pose and
+  the rest pose, which looks far worse than briefly holding a slightly stale pose. Keep
+  the hold short so a genuine loss still falls back.
+
 - **Aim each bone along the backbone; don't rotate about a fixed axis.** Real fingers
   bend in arbitrary planes. Rotating each joint about one preselected axis can never
   reproduce the shape, no matter how accurate the angle.

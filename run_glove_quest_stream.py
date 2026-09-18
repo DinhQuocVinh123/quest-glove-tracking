@@ -265,7 +265,11 @@ def build_points_payload(kpts):
 # von da sat nguong -- nen rat co (vd nen man hinh) la tut xuong duoi va bi loai
 # oan. Bu lai, ta da co cac kiem tra HINH DANG (chieu dai dot, nhay dot ngot) o
 # duoi, loai duoc dang sai mot cach doc lap voi do tin cay.
-FINGER_POINT_CONF_THR = 0.18    # do tin cay toi thieu cua tung diem tren ngon cai/tro
+# Ha tiep (0.18 -> 0.12): tren nen roi, do tin cay tung diem dao dong manh va
+# hay tut xuong sat nguong -- da tung bi loai vi thua dung 0.01. Diem so cua
+# model von khong dang tin cho chiec gang nay, nen de cac kiem tra HINH DANG
+# ben duoi lam nhiem vu gac cong thay vi phu thuoc vao nguong diem so.
+FINGER_POINT_CONF_THR = 0.12    # do tin cay toi thieu cua tung diem tren ngon cai/tro
 SEG_MIN_RATIO = 0.06            # 1 dot ngan nhat = 6% chieu dai long ban tay
 SEG_MAX_RATIO = 1.00            # 1 dot dai nhat = 100% chieu dai long ban tay
 FINGER_MIN_RATIO = 0.35         # ca ngon ngan nhat = 35% long ban tay
@@ -314,7 +318,23 @@ def is_pose_plausible(kpts, scores, prev_kpts=None):
     return True, ""
 
 
-def is_valid_hand(kpts, scores, conf_thr=0.25):
+# Ban tay phai chiem it nhat tung nay so voi canh ngan cua khung hinh.
+# Camera gan TREN DAU va ban tay gan vao canh tay nguoi deo, nen no khong the
+# nho ti hon duoc: du duoi thang het co thi long ban tay van chiem ~15-30%.
+# Thieu kiem tra nay, model rat de KHOA NHAM vao mot chi tiet nho (cum module
+# tren gang, mot vet tren man hinh...) va bao "bo xuong tay ti hon" -- ma cac
+# ti le BEN TRONG cum do lai tu no hop ly nen moi kiem tra khac deu cho qua.
+# Nguy hiem hon: khoa nham roi thi khung theo doi bam mai vao do, khong tu thoat.
+MIN_PALM_FRAME_RATIO = 0.07
+
+# So khung hinh duoc phep giu nguyen dang tot cuoi cung truoc khi bao Unity
+# ve tu the nghi (~0.4 giay o 12 fps). Du dai de bac qua cac lan do tin cay
+# chop nhoang tut xuong, nhung du ngan de khong giu mot dang sai qua lau khi
+# tay that su ra khoi tam nhin.
+HOLD_LAST_GOOD_FRAMES = 5
+
+
+def is_valid_hand(kpts, scores, conf_thr=0.25, frame_shape=None):
     """Tra ve (hop_le, do_tin_cay_loi, ly_do_loai).
 
     CAC NGUONG DA DUOC NOI RONG so voi ban goc: chung duoc viet cho webcam de
@@ -335,6 +355,15 @@ def is_valid_hand(kpts, scores, conf_thr=0.25):
     palm_len = np.linalg.norm(kpts[9] - wrist)
     if palm_len < 15.0:  # truoc: 30.0
         return False, core_conf, f"long ban tay qua nho ({palm_len:.0f}px)"
+
+    # Kich thuoc so voi KHUNG HINH (khong phai pixel tuyet doi) -- bat truong
+    # hop khoa nham vao mot chi tiet nho trong anh.
+    if frame_shape is not None:
+        frame_min = float(min(frame_shape[0], frame_shape[1]))
+        ratio = palm_len / max(frame_min, 1.0)
+        if ratio < MIN_PALM_FRAME_RATIO:
+            return False, core_conf, (f"tay qua nho so voi khung hinh "
+                                      f"({ratio * 100:.0f}% < {MIN_PALM_FRAME_RATIO * 100:.0f}%)")
 
     knuckle_span = np.linalg.norm(kpts[17] - kpts[5])
     if knuckle_span < 8.0:  # truoc: 20.0 -- nhin nghieng thi cac dot chum lai
@@ -447,27 +476,50 @@ def _recv_exact(conn, n):
 # lam tut FPS, moi khung hinh chi thu vai o (luan phien) -- va viec quet nay
 # chi chay khi DANG MAT tay, con khi da bam duoc thi dung khung da theo doi.
 SEARCH_BOXES_PER_FRAME = 3    # so o luoi thu moi khung hinh khi dang tim
-SEARCH_BOX_SCALE = 0.55       # canh o = 55% canh ngan cua khung hinh
-SEARCH_STEP_SCALE = 0.27      # buoc nhay giua cac o (nho hon canh o -> chong lan)
 REACQUIRE_EXPAND = 1.8        # he so nong rong khung cu khi vua moi mat tay
+
+# NHIEU CO O, khong phai mot co duy nhat. Ly do: neu o luon nho hon ban tay
+# thi moi o chi chua MOT PHAN tay (vai ngon), model co nhet ca bo 21 khop vao
+# manh do va sup do -- xuat ra mot cum diem chong khit len nhau, nhung van bao
+# do tin cay CAO. Trieu chung dac trung: "long ban tay = 0px" du tay dang
+# chiem nua khung hinh.
+#   0.45 -> tay o xa, nho trong khung
+#   0.70 -> co thong thuong
+#   0.95 -> tay sat camera, chiem gan het khung hinh
+SEARCH_BOX_SCALES = (0.45, 0.70, 0.95)
+SEARCH_STEP_RATIO = 0.5       # buoc nhay = 50% canh o -> cac o chong lan nhau
 
 
 def build_search_grid(w, h):
-    """Danh sach cac o phu kin TOAN khung hinh, co chong lan de tay nam vat
-    giua 2 o van duoc bat."""
-    side = SEARCH_BOX_SCALE * min(w, h)
-    step = SEARCH_STEP_SCALE * min(w, h)
-    boxes = []
-    y = 0.0
-    while y < h:
-        x = 0.0
-        while x < w:
-            bx1 = min(x, max(0.0, w - side))
-            by1 = min(y, max(0.0, h - side))
-            boxes.append(np.array([bx1, by1, bx1 + side, by1 + side]))
-            x += step
-        y += step
-    return boxes
+    """Cac o phu kin TOAN khung hinh o NHIEU CO khac nhau, co chong lan de tay
+    nam vat giua 2 o van duoc bat.
+
+    Cac o duoc XEN KE theo co (co vua truoc, roi to, roi nho) thay vi quet het
+    co nay moi sang co khac -- vi moi khung hinh ta chi thu vai o, xen ke giup
+    thu du cac co som hon thay vi phai doi quet xong ca mot co."""
+    per_scale = []
+    for scale in SEARCH_BOX_SCALES:
+        side = scale * min(w, h)
+        step = max(SEARCH_STEP_RATIO * side, 1.0)
+        boxes = []
+        y = 0.0
+        while y < h:
+            x = 0.0
+            while x < w:
+                bx1 = min(x, max(0.0, w - side))
+                by1 = min(y, max(0.0, h - side))
+                boxes.append(np.array([bx1, by1, bx1 + side, by1 + side]))
+                x += step
+            y += step
+        per_scale.append(boxes)
+
+    # Xen ke: lay lan luot 1 o tu moi co cho den khi het.
+    interleaved = []
+    for i in range(max(len(b) for b in per_scale)):
+        for boxes in per_scale:
+            if i < len(boxes):
+                interleaved.append(boxes[i])
+    return interleaved
 
 
 def expand_box(box, factor, w, h):
@@ -629,6 +681,7 @@ def main():
             pinch_amount = 0.0
             prev_kpts = None          # khung truoc da duoc chap nhan (de bat cu nhay dot ngot)
             fallback_reason = ""      # ly do dang fallback, hien len HUD
+            last_good_msg = None      # goi tin tot cuoi cung, dung cho an han
             reader = LatestFrameReader(conn)
             mrp_close = 0.0           # muc ep 3 ngon giua/ap ut/ut ve dang nam
             search_grid = None        # luoi o phu kin khung hinh (tao khi biet kich thuoc)
@@ -702,7 +755,8 @@ def main():
                             inst = results[0].pred_instances
                             kpts = inst.keypoints[0]
                             scores = inst.keypoint_scores[0]
-                            valid, core_conf, why = is_valid_hand(kpts, scores, conf_thr=args.conf_thr)
+                            valid, core_conf, why = is_valid_hand(
+                                kpts, scores, conf_thr=args.conf_thr, frame_shape=frame.shape)
                             if not valid and core_conf >= best_seen_conf:
                                 reject_reason = why  # ly do cua lan doan TOT NHAT
                             # Nho lai do tin cay CAO NHAT gap trong khung nay, ke
@@ -786,7 +840,8 @@ def main():
                             f"middle:{FIXED_MRP_BEND:.3f},ring:{FIXED_MRP_BEND:.3f},pinky:{FIXED_MRP_BEND:.3f},"
                             f"pinch:{pinch_amount:.3f}"
                         )
-                        udp_sock.sendto(msg.encode("utf-8"), (quest_ip, args.udp_port))
+                        last_good_msg = msg.encode("utf-8")
+                        udp_sock.sendto(last_good_msg, (quest_ip, args.udp_port))
 
                         bx1, by1, bx2, by2 = [int(v) for v in tracked_box]
                         cv2.rectangle(frame, (bx1, by1), (bx2, by2), (0, 255, 0), 2)
@@ -798,10 +853,25 @@ def main():
                             filter_kpts = None
                             prev_kpts = None
 
-                        # VAN PHAI GUI tin hieu, khong duoc im lang: neu khong,
-                        # Unity khong biet gi va se DONG BANG o dang sai cuoi
-                        # cung. "valid:0" bao Unity chuyen muot ve tu the nghi.
-                        udp_sock.sendto(b"valid:0", (quest_ip, args.udp_port))
+                        # AN HAN: giu nguyen dang TOT CUOI CUNG them vai khung
+                        # truoc khi bao "khong hop le".
+                        #
+                        # Ly do: tren nen roi, do tin cay cua model dao dong
+                        # manh -- rat hay co 1-2 khung tut xuong duoi nguong roi
+                        # len lai ngay. Neu bao "khong hop le" tuc thi, tay ao
+                        # se giat lien tuc giua dang that va tu the nghi, trong
+                        # con te hon la giu nguyen dang cu trong tich tac.
+                        #
+                        # Chi giu trong thoi gian ngan: neu mat that (tay ra khoi
+                        # tam nhin) thi van phai ve tu the nghi, khong duoc giu
+                        # mot dang cu sai mai.
+                        if last_good_msg is not None and lost_frames <= HOLD_LAST_GOOD_FRAMES:
+                            udp_sock.sendto(last_good_msg, (quest_ip, args.udp_port))
+                        else:
+                            # VAN PHAI GUI tin hieu, khong duoc im lang: neu khong,
+                            # Unity khong biet gi va se DONG BANG o dang sai cuoi
+                            # cung. "valid:0" bao Unity chuyen muot ve tu the nghi.
+                            udp_sock.sendto(b"valid:0", (quest_ip, args.udp_port))
 
                     draw_hud(frame, thumb_joints, index_joints, pinch_amount, fps, found_hand,
                              spread_amount, spread_deg)
