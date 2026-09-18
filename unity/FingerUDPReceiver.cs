@@ -33,7 +33,7 @@ public class FingerUDPReceiver : MonoBehaviour
     [SerializeField] private HandVisual _handVisual;
 
     [Header("BÁM THEO BACKBONE (khuyên dùng) -- xoay từng đốt xương chĩa đúng hướng đoạn backbone của model")]
-    [Tooltip("BAT: nhan thang 9 diem (co tay + 4 ngon cai + 4 ngon tro) tu Python, roi xoay MOI DOT XUONG sao cho no chia dung huong doan backbone tuong ung -- tai tao dung HINH DANG ngon tay.\n\n" +
+    [Tooltip("BAT: nhan thang 21 diem (co tay + 4 diem moi ngon) tu Python, roi xoay MOI DOT XUONG sao cho no chia dung huong doan backbone tuong ung -- tai tao dung HINH DANG ngon tay.\n\n" +
              "TAT: quay ve cach cu (xoay moi khop quanh 1 truc co dinh theo do cong) -- cach do KHONG THE tai tao dung hinh dang, vi ngon tay that cong trong mat phang bat ky, khong trung voi truc do.\n\n" +
              "Camera gan tren dau kinh nen huong tren anh 2D ~ huong ban nhin thay: chia dung huong 2D thi tay ao trong dung dang tu goc nhin cua ban. Cach nay TU TIM RA truc xoay dung cho tung xuong, khong can doan X/Y/Z.")]
     [SerializeField] private bool _useBackboneRetarget = true;
@@ -96,7 +96,7 @@ public class FingerUDPReceiver : MonoBehaviour
 
     [Header("Vùng chết (bỏ qua bend nhỏ hơn giá trị này, coi như đang mở)")]
     [Range(0f, 0.6f)]
-    [SerializeField] private float _deadzone = 0.3f;
+    [SerializeField] private float _deadzone = 0.05f;
 
     [Header("Góc xoay bàn tay (từ solvePnP) -- BẬT/TẮT và hiệu chỉnh trục")]
     [SerializeField] private bool _applyRotation = false;
