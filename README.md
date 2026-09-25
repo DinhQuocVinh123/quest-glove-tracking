@@ -106,6 +106,12 @@ python run_glove_quest_stream.py --original
 A debug window shows the detected hand skeleton plus diagnostics (FPS, confidence,
 why a frame was rejected, and so on). The base model **downloads itself** on first run.
 
+**To find out why tracking drops out,** add `--record`: every processed frame is saved
+as a JPEG to `recordings/<timestamp>/`, with `log.csv` noting per frame whether a hand
+was found and, if not, which check rejected it. You can then replay the frames offline
+to test a fix without putting the headset back on. Recordings are large (~200 MB per
+minute) and are git-ignored.
+
 **If it won't connect:** the headset and PC must be on the same network, and that
 network must allow devices to talk to each other directly. Corporate networks often
 block this — a phone hotspot is the most reliable option.
@@ -188,6 +194,14 @@ Drop the flag and the script will use `checkpoints/rtmpose_glove_finetuned.pth` 
   each one contains only part of it — and a top-down model will still cram all 21 joints
   into that fragment, collapsing them into a cluster while reporting *high* confidence.
   Telltale symptom: "palm length = 0 px" while the hand fills half the frame.
+
+- **Let search boxes extend past the image edge.** The head-mounted camera often sees
+  the hand at the bottom of the frame with the wrist cut off. Clamping boxes to the image
+  squashes them so they no longer contain the whole hand, and the model collapses the
+  joints into a tiny cluster (rejected as "palm too small") even though the hand is
+  clearly visible. The image is now padded with gray (`EDGE_PAD_RATIO`) so boxes can
+  overhang it; replaying a real 1030-frame recording raised the share of frames with a
+  tracked hand from 85% to 89%, with no extra false detections when no hand was in view.
 
 - **Also check the hand's size relative to the frame.** Every other check compares the
   skeleton against itself, so a perfectly proportioned *tiny* hand passes all of them.

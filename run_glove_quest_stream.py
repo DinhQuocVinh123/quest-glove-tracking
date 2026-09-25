@@ -487,6 +487,14 @@ REACQUIRE_EXPAND = 1.8        # he so nong rong khung cu khi vua moi mat tay
 #   0.70 -> co thong thuong
 #   0.95 -> tay sat camera, chiem gan het khung hinh
 SEARCH_BOX_SCALES = (0.45, 0.70, 0.95)
+
+# Cho phep khung bao TRAN RA NGOAI anh (phan tran duoc to xam). Camera gan
+# tren dau nen tay hay nam sat MEP DUOI anh, co tay bi cat ra ngoai. Neu ep
+# khung nam trong anh, khung bi xen meo, khong om tron ban tay, model don 21
+# diem thanh mot cum nho va bi loai ("long ban tay qua nho") du tay ro rang.
+# Chay lai 1030 khung ghi that (recordings/20260925_140855): nhan ra tay
+# 85% -> 89% khung, khong nhan nham them luc khong co tay.
+EDGE_PAD_RATIO = 0.25
 SEARCH_STEP_RATIO = 0.5       # buoc nhay = 50% canh o -> cac o chong lan nhau
 
 
@@ -522,16 +530,17 @@ def build_search_grid(w, h):
     return interleaved
 
 
-def expand_box(box, factor, w, h):
+def expand_box(box, factor, w, h, pad=0):
     """Nong rong mot khung quanh tam cua no -- dung de tim lai tay ngay quanh
-    vi tri cu (tay thuong chi vua dich di mot chut)."""
+    vi tri cu (tay thuong chi vua dich di mot chut). Khung duoc phep tran ra
+    ngoai anh toi `pad` pixel (xem EDGE_PAD_RATIO)."""
     cx = (box[0] + box[2]) * 0.5
     cy = (box[1] + box[3]) * 0.5
     half_w = (box[2] - box[0]) * 0.5 * factor
     half_h = (box[3] - box[1]) * 0.5 * factor
     return np.array([
-        max(0.0, cx - half_w), max(0.0, cy - half_h),
-        min(float(w), cx + half_w), min(float(h), cy + half_h),
+        max(-pad, cx - half_w), max(-pad, cy - half_h),
+        min(float(w + pad), cx + half_w), min(float(h + pad), cy + half_h),
     ])
 
 
@@ -625,6 +634,13 @@ def main():
     else:
         _default_device = "cpu"
     parser.add_argument("--device", type=str, default=_default_device, help="Device: 'cuda', 'mps' or 'cpu'")
+    parser.add_argument(
+        "--record",
+        action="store_true",
+        help="Luu ANH GOC cua tung khung + ket qua nhan dang (tim thay tay? vi sao bi loai?) vao "
+             "recordings/<thoi gian>/ -- de phan tich sau vi sao mat dau tay, va thu cach sua tren "
+             "chinh nhung khung do ma khong can deo kinh lai.",
+    )
     args = parser.parse_args()
 
     if args.original:
@@ -683,6 +699,15 @@ def main():
             fallback_reason = ""      # ly do dang fallback, hien len HUD
             last_good_msg = None      # goi tin tot cuoi cung, dung cho an han
             reader = LatestFrameReader(conn)
+
+            # Ghi lai (xem --record): moi lan kinh ket noi la 1 thu muc moi.
+            rec_dir, rec_log, rec_idx = None, None, 0
+            if args.record:
+                rec_dir = os.path.join(_BASE_DIR, "recordings", time.strftime("%Y%m%d_%H%M%S"))
+                os.makedirs(rec_dir, exist_ok=True)
+                rec_log = open(os.path.join(rec_dir, "log.csv"), "w", encoding="utf-8", buffering=1)
+                rec_log.write("frame,t,found,state,best_conf,sent,reject_reason,fallback_reason\n")
+                print(f"[RECORD] Dang luu khung hinh vao {rec_dir}")
             mrp_close = 0.0           # muc ep 3 ngon giua/ap ut/ut ve dang nam
             search_grid = None        # luoi o phu kin khung hinh (tao khi biet kich thuoc)
             search_idx = 0            # o dang quet toi (luan phien qua tung khung)
@@ -701,12 +726,24 @@ def main():
                         continue
                     h, w = frame.shape[:2]
 
+                    # Luu anh GOC truoc khi ve khung xuong / chu len.
+                    if rec_dir is not None:
+                        rec_idx += 1
+                        cv2.imwrite(os.path.join(rec_dir, f"{rec_idx:05d}.jpg"), frame,
+                                    [cv2.IMWRITE_JPEG_QUALITY, 95])
+
                     curr_time = time.time()
                     fps = 0.90 * fps + 0.10 * (1.0 / max(curr_time - prev_time, 1e-5))
                     prev_time = curr_time
 
                     if search_grid is None:
                         search_grid = build_search_grid(w, h)
+
+                    # Anh da dem vien (xem EDGE_PAD_RATIO). Toa do khung bao va
+                    # diem van tinh theo anh GOC; chi cong/tru `pad` khi goi model.
+                    pad = int(EDGE_PAD_RATIO * max(w, h))
+                    padded = cv2.copyMakeBorder(frame, pad, pad, pad, pad, cv2.BORDER_CONSTANT,
+                                                value=(114, 114, 114))
 
                     # Danh sach khung thu theo thu tu uu tien. Vong lap ben duoi
                     # DUNG NGAY khi mot khung cho ket qua tot, nen khi dang bam
@@ -725,7 +762,7 @@ def main():
                     # dung khung hong do suot 12 khung (~1 giay) moi chiu chuyen
                     # sang tim kiem. Gio that bai la tim lai ngay lap tuc.
                     if last_known_box is not None:
-                        candidate_boxes.append(expand_box(last_known_box, REACQUIRE_EXPAND, w, h))
+                        candidate_boxes.append(expand_box(last_known_box, REACQUIRE_EXPAND, w, h, pad))
 
                     # 3. Quet dan TOAN khung hinh, moi khung vai o, luan phien.
                     for k in range(SEARCH_BOXES_PER_FRAME):
@@ -741,19 +778,19 @@ def main():
                     fallback_reason = ""
 
                     for c_box in candidate_boxes:
-                        bx1 = max(0, min(w - 60, int(c_box[0])))
-                        by1 = max(0, min(h - 60, int(c_box[1])))
-                        bx2 = max(bx1 + 60, min(w, int(c_box[2])))
-                        by2 = max(by1 + 60, min(h, int(c_box[3])))
-                        eval_box = np.array([[bx1, by1, bx2, by2]])
+                        bx1 = max(-pad, min(w + pad - 60, int(c_box[0])))
+                        by1 = max(-pad, min(h + pad - 60, int(c_box[1])))
+                        bx2 = max(bx1 + 60, min(w + pad, int(c_box[2])))
+                        by2 = max(by1 + 60, min(h + pad, int(c_box[3])))
+                        eval_box = np.array([[bx1 + pad, by1 + pad, bx2 + pad, by2 + pad]])
 
-                        results = inference_topdown(model, frame, bboxes=eval_box)
+                        results = inference_topdown(model, padded, bboxes=eval_box)
                         if args.device == "mps":
                             torch.mps.synchronize()
 
                         if len(results) > 0 and hasattr(results[0], "pred_instances"):
                             inst = results[0].pred_instances
-                            kpts = inst.keypoints[0]
+                            kpts = inst.keypoints[0] - pad
                             scores = inst.keypoint_scores[0]
                             valid, core_conf, why = is_valid_hand(
                                 kpts, scores, conf_thr=args.conf_thr, frame_shape=frame.shape)
@@ -801,7 +838,8 @@ def main():
                         palm_len = np.linalg.norm(smoothed_kpts[9] - smoothed_kpts[0])
                         box_side = max((max_x - min_x) * 1.35, (max_y - min_y) * 1.35, palm_len * 2.8, 140.0)
                         half = box_side / 2.0
-                        new_box = np.array([max(0, cx - half), max(0, cy - half), min(w, cx + half), min(h, cy + half)])
+                        new_box = np.array([max(-pad, cx - half), max(-pad, cy - half),
+                                            min(w + pad, cx + half), min(h + pad, cy + half)])
                         tracked_box = 0.70 * new_box + 0.30 * tracked_box if tracked_box is not None else new_box
                         # Nho lai vi tri nay de lan sau mat tay con biet cho ma
                         # tim lai truoc, thay vi quet lai tu dau ca khung hinh.
@@ -873,6 +911,17 @@ def main():
                             # cung. "valid:0" bao Unity chuyen muot ve tu the nghi.
                             udp_sock.sendto(b"valid:0", (quest_ip, args.udp_port))
 
+                    if rec_log is not None:
+                        if found_hand:
+                            sent = "good"
+                        elif last_good_msg is not None and lost_frames <= HOLD_LAST_GOOD_FRAMES:
+                            sent = "hold"
+                        else:
+                            sent = "invalid"
+                        clean = lambda s: s.replace(",", ";")
+                        rec_log.write(f"{rec_idx},{curr_time:.3f},{int(found_hand)},{state},{best_seen_conf:.3f},"
+                                      f"{sent},{clean(reject_reason)},{clean(fallback_reason)}\n")
+
                     draw_hud(frame, thumb_joints, index_joints, pinch_amount, fps, found_hand,
                              spread_amount, spread_deg)
 
@@ -912,6 +961,9 @@ def main():
                 print(f"[DISCONNECTED] Mat ket noi voi kinh ({quest_ip}): {e}. Cho ket noi lai...")
             finally:
                 conn.close()
+                if rec_log is not None:
+                    rec_log.close()
+                    print(f"[RECORD] Da luu {rec_idx} khung vao {rec_dir}")
     except KeyboardInterrupt:
         print("\nDung lai.")
     finally:
