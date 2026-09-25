@@ -43,6 +43,12 @@ public class FingerUDPReceiver : MonoBehaviour
              "BAT: giu nguyen do 'chia vao/ra man hinh' cua tu the nghi (trong day dan hon khi nhin nghieng), NHUNG pha vo pinch: ngon cai o tu the nghi von chia ngang qua long ban tay tuc la HUONG VE PHIA MAT BAN, nen no bi day ra truoc so voi ngon tro va khong bao gio cham duoc nhau. " +
              "Chua ke xuong chia ve phia mat se bi PHOI CANH lam ngan lai tren man hinh, khien dau ngon voi khong toi.")]
     [SerializeField] private bool _preserveRestDepth = false;
+    [Tooltip("BAT (khuyen dung): dung lai dang 3D cua ngon tay -- tim GOC KHOP sao cho ngon ao nhin tu camera trung voi cac diem 2D, " +
+             "ngon chi duoc gap theo cach khop that cho phep (xem FingerChainFitter). Dung ca khi ngon chia vao/ra camera (vd nam tay nhin tu tren xuong).\n\n" +
+             "TAT: cach cu -- xoay tung dot cho chia dung huong 2D va ep nam phang trong mat phang nhin (nam tay se thanh ngon tro dung thang).")]
+    [SerializeField] private bool _useAnatomicalFit = true;
+    [Tooltip("Tay trai hay phai -- de biet phia nao la long ban tay khi tu tim truc gap ngon.")]
+    [SerializeField] private bool _leftHand = false;
 
     [Header("Fallback -- về tư thế nghỉ khi dữ liệu không đáng tin")]
     [Tooltip("Model doi khi doan sai (tay chua vao tu the san sang, bi che khuat...) tao ra dang tay cong venh/lat nguoc rat ky quac. " +
@@ -190,6 +196,9 @@ public class FingerUDPReceiver : MonoBehaviour
     // qua cua khung truoc, lam do XOAN quanh truc xuong tich luy dan va tay
     // bi van veo (dung trieu chung dang gap).
     private Quaternion[][] _boneRestLocalRotation;
+    private FingerChainFitter[] _fitters; // moi ngon 1 bo giai goc khop (xem _useAnatomicalFit)
+    private Transform _wrist;
+    private int _lastFitFrame = -1;
     // 1 = bam hoan toan theo tay that, 0 = ve han tu the nghi. Chuyen dan giua
     // 2 gia tri nay de khong bi giat khi du lieu chap chon.
     private float _poseBlend;
@@ -244,6 +253,26 @@ public class FingerUDPReceiver : MonoBehaviour
             : 0f;
 
         CacheBoneLocalDirections();
+        CreateFitters();
+    }
+
+    /// <summary>Tao bo giai goc khop cho tung ngon, tu tu the nghi cua rig.</summary>
+    private void CreateFitters()
+    {
+        _wrist = _rig.indexProximal != null ? _rig.indexProximal.parent : null;
+        while (_wrist != null && !_wrist.name.Contains("Wrist")) _wrist = _wrist.parent;
+        if (_wrist == null || _rig.middleProximal == null || _rig.pinkyProximal == null) return;
+
+        Vector3 palmTarget = FingerChainFitter.PalmTarget(
+            _wrist, _rig.indexProximal, _rig.middleProximal, _rig.pinkyProximal, _leftHand);
+
+        _fitters = new FingerChainFitter[_fingerJoints.Length];
+        for (int f = 0; f < _fingerJoints.Length; f++)
+        {
+            Transform[] chain = _fingerJoints[f];
+            if (System.Array.IndexOf(chain, null) >= 0 || chain[2].childCount == 0) continue;
+            _fitters[f] = new FingerChainFitter(chain, chain[2].GetChild(0), f == 0, palmTarget);
+        }
     }
 
     /// <summary>Do huong "doc theo than xuong" cho tung dot, trong he toa do
@@ -552,11 +581,50 @@ public class FingerUDPReceiver : MonoBehaviour
         }
     }
 
+    /// <summary>Dung lai dang 3D cua ca 5 ngon tu 21 diem 2D (xem FingerChainFitter).</summary>
+    private void ApplyAnatomicalFit()
+    {
+        Transform view = _viewReference != null ? _viewReference : transform.parent;
+        if (view == null) return;
+
+        // Diem tu Python da chia cho chieu dai long ban tay TREN ANH. Lam tuong
+        // tu voi tay ao: chieu long ban tay ao (huong lay tu Quest) len mat
+        // phang nhin -- long ban tay nghieng thi ca 2 ben cung ngan lai nhu nhau.
+        Vector3 palm = _rig.middleProximal.position - _wrist.position;
+        Vector2 palmOnImage = new Vector2(Vector3.Dot(palm, view.right), Vector3.Dot(palm, view.up));
+        // Long ban tay gan nhu vuong goc voi mat phang anh -> chieu dai tren anh
+        // qua ngan, chia cho no se khuech dai nhieu; chan duoi o 35%.
+        float palm2D = Mathf.Max(palmOnImage.magnitude, 0.35f * palm.magnitude);
+
+        // Ham nay chay 2 lan moi khung (event cua HandVisual + LateUpdate):
+        // chi GIAI 1 lan, lan sau chi ghi lai goc da co vao xuong.
+        bool solve = _poseBlend > 0f && Time.frameCount != _lastFitFrame;
+        if (solve) _lastFitFrame = Time.frameCount;
+
+        for (int f = 0; f < _fitters.Length; f++)
+        {
+            FingerChainFitter fitter = _fitters[f];
+            if (fitter == null) continue;
+
+            if (solve)
+            {
+                int b = FingerBasePointIndex[f];
+                Vector2 root = _currentPoints[b];
+                fitter.Solve(_currentPoints[b + 1] - root, _currentPoints[b + 2] - root, _currentPoints[b + 3] - root,
+                             view.right, view.up, palm2D);
+            }
+            // Tron ve tu the nghi khi du lieu khong dang tin (giong cach cu)
+            fitter.Apply(_poseBlend);
+        }
+    }
+
     private void ApplyFingerCurl()
     {
         if (_useBackboneRetarget)
         {
-            if (_hasPoints) ApplyBackboneRetarget();
+            if (!_hasPoints) return;
+            if (_useAnatomicalFit && _fitters != null) ApplyAnatomicalFit();
+            else ApplyBackboneRetarget();
             return;
         }
 

@@ -42,7 +42,7 @@ path, so it **adds no per-frame latency**.
   with the Meta XR SDK already matches
 - A PC with an **NVIDIA GPU**, on the same network as the headset
 
-### Step 1 — Copy three C# files
+### Step 1 — Copy four C# files
 
 Copy these from `unity/` into your project's `Assets/Scripts/`:
 
@@ -50,6 +50,7 @@ Copy these from `unity/` into your project's `Assets/Scripts/`:
 |---|---|
 | `GloveLiveStreamer.cs` | Streams passthrough camera frames to the PC |
 | `FingerUDPReceiver.cs` | Receives the 21 points and rotates the hand bones |
+| `FingerChainFitter.cs` | Recovers each finger's 3D pose from the 2D points (used by `FingerUDPReceiver`) |
 | `HandFingerRig.cs` | Finds the finger bones by their `XRHand_*` names |
 
 (`GloveDatasetCollector.cs` is only needed if you want to capture training data.)
@@ -207,7 +208,20 @@ Drop the flag and the script will use `checkpoints/rtmpose_glove_finetuned.pth` 
 
 - **Pinch only closes if both fingers share a plane.** Keeping each bone's rest-pose
   depth leaves the thumb permanently angled toward the viewer, so it can never meet the
-  index finger (`Preserve Rest Depth` must be OFF).
+  index finger (`Preserve Rest Depth` must be OFF). *Superseded by the next point when
+  `Use Anatomical Fit` is on.*
+
+- **Flattening 2D directions breaks as soon as a finger points toward or away from the
+  camera.** A fist seen from above: the index finger's first bone points *away* from the
+  eye, shows up as a short segment pointing up in the image, and the flattened virtual
+  finger sticks straight up. `FingerChainFitter` instead solves for the **joint angles**
+  whose projection matches the 2D points, with each joint only allowed to bend the way a
+  real one does (toward the palm, within limits). That constraint is what recovers the
+  missing depth. Two traps found while building it: the 2D image often fits two poses
+  almost equally well (finger straight and pointing away vs. curled into the palm), so
+  the solver also restarts from a few seed poses; and a strong "stay close to last frame"
+  term locks in a wrong first answer — keep it weak and smooth the 2D points instead.
+  Wrist and palm orientation come from Quest hand tracking, not from the image.
 
 - **The middle, ring and little fingers are occluded by the hand itself during a pinch**,
   and the model guesses wildly there. The Python side forces them into a closed pose
