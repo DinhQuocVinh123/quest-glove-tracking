@@ -19,3 +19,6 @@ __pycache__/
 # File tam luc chay
 live_snapshot.jpg
 glove_config.json
+
+# Khung hinh ghi lai bang --record (~200 MB/phut)
+recordings/
