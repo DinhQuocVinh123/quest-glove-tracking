@@ -24,7 +24,7 @@ public sealed class FingerChainFitter
 {
     private const int Bones = 3;
     private const int Params = 4; // [0] xoe o goc, [1] gap o goc, [2] gap khop giua, [3] gap khop dau
-    private const int Residuals = 6 + Params + 1 + 3;
+    private const int Residuals = 6 + Params + 1 + 3 + 3; // ... + 3 cho "keo dau ngon toi diem hen" (RefineTowards)
 
     // Trong so (don vi: chieu dai long ban tay tren anh, cho moi DO lech).
     // Nho -> chi co tac dung khi du lieu anh khong du de quyet dinh.
@@ -85,8 +85,12 @@ public sealed class FingerChainFitter
         _spreadAxis = Vector3.Cross(along, _flexAxis[0]).normalized;
 
         // Gioi han goc khop (do, so voi tu the nghi cua rig)
-        _min = isThumb ? new[] { -45f, -45f, -20f, -20f } : new[] { -20f, -15f, 0f, -5f };
-        _max = isThumb ? new[] { 45f, 45f, 75f, 90f } : new[] { 20f, 95f, 110f, 90f };
+        // Ngon cai: gioi han cu (+-45 xoe, be nguoc toi -20) de bo giai chon dang
+        // BE NGUOC ra sau long ban tay khi anh mo ho (do bang glove_diag + dung
+        // lai tay ao: xoe cham +45 kem khop giua be nguoc). Thu hep theo tam van
+        // dong that cua ngon cai (khop dot dau chi be nguoc duoc chut it).
+        _min = isThumb ? new[] { -35f, -20f, -10f, -10f } : new[] { -20f, -15f, 0f, -5f };
+        _max = isThumb ? new[] { 35f, 45f, 70f, 85f } : new[] { 20f, 95f, 110f, 90f };
     }
 
     public void Reset()
@@ -129,8 +133,17 @@ public sealed class FingerChainFitter
         _nextSeed = (_nextSeed + 1) % Seeds.GetLength(0);
         for (int p = 0; p < Params; p++) _seed[p] = Seeds[s, p];
         Clamp(_seed);
-        if (Refine(_seed) < cost) System.Array.Copy(_seed, _angles, Params);
+        float seedCost = Refine(_seed);
+        // Chi DOI sang cach hieu khac khi no khop anh RO RANG tot hon (hoac cach
+        // hien tai da sai nhieu). Neu 2 cach gan bang nhau, nhieu nho giua cac
+        // khung se lam bo giai doi qua doi lai -> ngon ao giat/meo (do bang
+        // glove_diag: 30/39 cu nhay >20 do xay ra khi diem 2D gan nhu khong doi).
+        if (seedCost < cost * SwitchRatio || (cost > BadCost && seedCost < cost))
+            System.Array.Copy(_seed, _angles, Params);
     }
+
+    private const float SwitchRatio = 0.7f; // cach moi phai co sai so thap hon it nhat 30%
+    private const float BadCost = 0.05f;    // cach hien tai sai nhieu hon muc nay thi nhan moi cai tot hon
 
     private int _nextSeed;
 
@@ -141,6 +154,37 @@ public sealed class FingerChainFitter
         { 0f, 30f, 40f, 25f },
         { 0f, 75f, 95f, 60f },
     };
+
+    private Vector3 _tipTarget;
+    private float _tipTargetWeight; // 0 = khong keo
+    private float _invPalm3D = 1f / 0.086f;
+
+    /// <summary>Vi tri dau ngon (the gioi) voi goc hien tai -- tinh tay, khong dong vao Transform.</summary>
+    public Vector3 TipWorld()
+    {
+        ForwardKinematics(_angles);
+        return _joints[Bones];
+    }
+
+    /// <summary>Giai lai (tu goc hien tai) voi them 1 dieu kien: KEO dau ngon toi
+    /// diem hen trong 3D, van giu khop anh 2D cua lan Solve vua roi.
+    ///
+    /// Dung cho PINCH: ngon cai va ngon tro duoc dung RIENG nen moi ngon khop
+    /// anh 2D nhung chieu sau lech nhau vai cm -> tay that chum ma tay ao van ho
+    /// (do bang glove_diag: khoang cach 3D nho nhat ~3.7 cm). Anh 2D gan nhu
+    /// khong rang buoc chieu sau, nen keo 2 dau ngon ve cung 1 diem chu yeu sua
+    /// CHIEU SAU, hinh chieu tren anh gan nhu giu nguyen.</summary>
+    /// <param name="weight">0 = khong keo; 1 = keo manh ngang sai so anh 2D.</param>
+    /// <param name="palm3D">Chieu dai long ban tay that (met) -- de doi khoang cach 3D ra cung don vi voi sai so anh.</param>
+    public void RefineTowards(Vector3 targetWorld, float weight, float palm3D)
+    {
+        if (weight <= 0f) return;
+        _tipTarget = targetWorld;
+        _tipTargetWeight = weight;
+        _invPalm3D = 1f / Mathf.Max(palm3D, 1e-3f);
+        Refine(_angles);
+        _tipTargetWeight = 0f;
+    }
 
     /// <summary>Ghi goc vao xuong. blend: 1 = theo ket qua giai, 0 = tu the nghi.</summary>
     public void Apply(float blend)
@@ -236,7 +280,11 @@ public sealed class FingerChainFitter
         r[6 + Params] = _isThumb ? 0f : CouplingWeight * (a[3] - 0.67f * a[2]);
         // Phat be nguoc: anh 2D khong phan biet duoc gap VE PHIA camera hay RA XA
         // -- khi mo ho thi chon cach gap vao long ban tay (tu nhien hon).
-        for (int p = 1; p < Params; p++) r[6 + Params + p] = _isThumb ? 0f : HyperextensionWeight * Mathf.Min(0f, a[p]);
+        // Ngon cai cung vay (truoc day bo qua -> ngon cai ao hay cong nguoc).
+        for (int p = 1; p < Params; p++) r[6 + Params + p] = HyperextensionWeight * Mathf.Min(0f, a[p]);
+        // Keo dau ngon toi diem hen trong 3D (chi khac 0 khi dang RefineTowards)
+        Vector3 toTarget = (_joints[3] - _tipTarget) * (_tipTargetWeight * _invPalm3D);
+        r[Residuals - 3] = toTarget.x; r[Residuals - 2] = toTarget.y; r[Residuals - 1] = toTarget.z;
 
         float sum = 0f;
         for (int k = 0; k < Residuals; k++) sum += r[k] * r[k];

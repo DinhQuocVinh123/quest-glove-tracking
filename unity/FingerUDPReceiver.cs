@@ -49,6 +49,10 @@ public class FingerUDPReceiver : MonoBehaviour
     [SerializeField] private bool _useAnatomicalFit = true;
     [Tooltip("Tay trai hay phai -- de biet phia nao la long ban tay khi tu tim truc gap ngon.")]
     [SerializeField] private bool _leftHand = false;
+    [Tooltip("BAT de chan doan ngon tay giat/meo: moi khung ghi 1 dong CSV (diem nhan tu Python, goc khop FingerChainFitter tinh ra, " +
+             "huong co tay tu Quest, huong nhin, co goi tin moi khong) vao Application.persistentDataPath/glove_diag_*.csv. " +
+             "Tren Quest lay ve bang: adb pull /sdcard/Android/data/<ten goi>/files/ . Nho TAT sau khi chan doan xong.")]
+    [SerializeField] private bool _logDiagnostics = false;
 
     [Header("Fallback -- về tư thế nghỉ khi dữ liệu không đáng tin")]
     [Tooltip("Model doi khi doan sai (tay chua vao tu the san sang, bi che khuat...) tao ra dang tay cong venh/lat nguoc rat ky quac. " +
@@ -57,6 +61,9 @@ public class FingerUDPReceiver : MonoBehaviour
     [SerializeField] private float _fallbackBlendSeconds = 0.15f;
     [Tooltip("Neu khong nhan duoc goi tin nao trong so giay nay (Python tat, mat mang...), tu dong ve tu the nghi.")]
     [SerializeField] private float _dataTimeoutSeconds = 0.5f;
+    [Tooltip("Dang CAM vat ma Python mat tay (xoay tay, che khuat...): GIU NGUYEN dang ngon cuoi cung toi da so giay nay, thay vi xoe ve " +
+             "tu the nghi (xoe ra = vat tuot khoi tay). Co tay van do Quest bam nen vat van di theo tay. 0 = tat.")]
+    [SerializeField] private float _holdPoseWhileGraspingSeconds = 1.5f;
 
     [Header("4 ngón (trỏ/giữa/áp út/út) -- trục cong (chỉ dùng khi TẮT bám backbone)")]
     [SerializeField] private Axis _curlAxis = Axis.X;
@@ -199,6 +206,15 @@ public class FingerUDPReceiver : MonoBehaviour
     private FingerChainFitter[] _fitters; // moi ngon 1 bo giai goc khop (xem _useAnatomicalFit)
     private Transform _wrist;
     private int _lastFitFrame = -1;
+    private bool _packetThisFrame; // co goi tin moi trong khung nay (cho chan doan)
+    private int _latestFrameId, _currentFrameId; // so thu tu anh cua cac diem (0 = Python cu khong gui)
+    private bool _usedCameraAxes;                // khung nay dung truc camera (true) hay truc mat (false)
+    private GloveLiveStreamer _streamer;
+
+    [Tooltip("BAT: dung ngon theo truc cua CAMERA passthrough luc chup anh (lay tu GloveLiveStreamer theo so thu tu anh) -- " +
+             "anh duoc chup tu camera, dat lech va huong hoi khac mat. Khong co thong tin thi tu quay ve truc cua mat.")]
+    [SerializeField] private bool _useCameraAxes = true;
+    private System.IO.StreamWriter _diag;
     // 1 = bam hoan toan theo tay that, 0 = ve han tu the nghi. Chuyen dan giua
     // 2 gia tri nay de khong bi giat khi du lieu chap chon.
     private float _poseBlend;
@@ -332,6 +348,61 @@ public class FingerUDPReceiver : MonoBehaviour
         {
             _handVisual.WhenHandVisualUpdated -= ApplyFingerCurl;
         }
+        _diag?.Dispose();
+        _diag = null;
+    }
+
+    /// <summary>Tong goc gap (do) cua 1 ngon theo bo dung ngon (0 = duoi thang) --
+    /// de uoc luong muc co cua actuator chay doc ngon. f: 0 = cai, 1 = tro...</summary>
+    public float FingerFlexionDegrees(int f)
+    {
+        if (_fitters == null || f < 0 || f >= _fitters.Length || _fitters[f] == null) return 0f;
+        float[] a = _fitters[f].Angles;
+        return a[1] + a[2] + a[3];
+    }
+
+    /// <summary>Ghi 1 dong chan doan cho khung hien tai (xem _logDiagnostics).</summary>
+    private void WriteDiagnostics()
+    {
+        if (_fitters == null || _wrist == null) return;
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        if (_diag == null)
+        {
+            string path = System.IO.Path.Combine(Application.persistentDataPath,
+                "glove_diag_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".csv");
+            _diag = new System.IO.StreamWriter(path, false, new System.Text.UTF8Encoding(false));
+            var head = new System.Text.StringBuilder("t,frame,packet,valid,blend,held,tipgap,fid,camaxes,pinch,wx,wy,wz,wqx,wqy,wqz,wqw,vx,vy,vz,vqx,vqy,vqz,vqw");
+            for (int i = 0; i < NumBackbonePoints; i++) head.Append($",p{i}x,p{i}y");
+            for (int f = 0; f < _fitters.Length; f++) for (int j = 0; j < 4; j++) head.Append($",a{f}_{j}");
+            _diag.WriteLine(head.ToString());
+            Debug.Log($"[FingerUDPReceiver] Ghi chan doan vao {path}", this);
+        }
+
+        Transform view = _viewReference != null ? _viewReference : transform.parent;
+        Vector3 wp = _wrist.position, vp = view.position;
+        Quaternion wq = _wrist.rotation, vq = view.rotation;
+        var sb = new System.Text.StringBuilder(1200);
+        sb.Append(Time.time.ToString("F4", inv)).Append(',').Append(Time.frameCount).Append(',')
+          .Append(_packetThisFrame ? 1 : 0).Append(',').Append(_dataValid ? 1 : 0).Append(',')
+          .Append(_poseBlend.ToString("F3", inv));
+        // Tay nay co dang cam vat nao khong, va khoang cach 3D giua dau ngon cai/tro
+        // ma bo dung ngon tinh ra -- de biet pinch co khep duoc tu nhien khong.
+        Transform thumbTip = _rig.thumbDistal != null && _rig.thumbDistal.childCount > 0 ? _rig.thumbDistal.GetChild(0) : null;
+        Transform indexTip = _rig.indexDistal != null && _rig.indexDistal.childCount > 0 ? _rig.indexDistal.GetChild(0) : null;
+        bool held = false;
+        foreach (var obj in SquishyPinchable.Active) held |= thumbTip != null && obj.IsHeldBy(thumbTip);
+        float tipGap = thumbTip != null && indexTip != null ? Vector3.Distance(thumbTip.position, indexTip.position) : -1f;
+        sb.Append(',').Append(held ? 1 : 0).Append(',').Append(tipGap.ToString("F4", inv));
+        sb.Append(',').Append(_currentFrameId).Append(',').Append(_usedCameraAxes ? 1 : 0)
+          .Append(',').Append(PinchOnImage.ToString("F2", inv));
+        foreach (float v in new[] { wp.x, wp.y, wp.z, wq.x, wq.y, wq.z, wq.w, vp.x, vp.y, vp.z, vq.x, vq.y, vq.z, vq.w })
+            sb.Append(',').Append(v.ToString("F5", inv));
+        for (int i = 0; i < NumBackbonePoints; i++)
+            sb.Append(',').Append(_currentPoints[i].x.ToString("F4", inv)).Append(',').Append(_currentPoints[i].y.ToString("F4", inv));
+        foreach (var fitter in _fitters)
+            for (int j = 0; j < 4; j++) sb.Append(',').Append(fitter != null ? fitter.Angles[j].ToString("F2", inv) : "");
+        _diag.WriteLine(sb.ToString());
+        if (Time.frameCount % 72 == 0) _diag.Flush(); // khong mat du lieu neu ung dung bi tat ngang
     }
 
     private void ReceiveLoop()
@@ -381,6 +452,8 @@ public class FingerUDPReceiver : MonoBehaviour
                 if (key == "ty") { _latestTranslation.y = v; continue; }
                 if (key == "tz") { _latestTranslation.z = v; continue; }
                 if (key == "pinch") { _latestPinch = Mathf.Clamp01(v); continue; }
+                // So thu tu anh ma cac diem nay duoc tinh tu (GloveLiveStreamer danh so)
+                if (key == "fid") { _latestFrameId = (int)v; continue; }
                 if (key == "spread") { _latestSpread = Mathf.Clamp01(v); continue; }
                 // Python bao dang tay co hop ly khong (0 = doan sai, ve tu the nghi).
                 if (key == "valid") { _dataValid = v > 0.5f; continue; }
@@ -424,6 +497,24 @@ public class FingerUDPReceiver : MonoBehaviour
         _hasPoints = true;
     }
 
+    private float _lastTrustedTime = -999f;
+    private Transform _thumbTipCache;
+
+    /// <summary>Ban tay nay dang cam vat bop duoc nao do khong.</summary>
+    private bool IsGrasping()
+    {
+        if (_holdPoseWhileGraspingSeconds <= 0f) return false;
+        if (_thumbTipCache == null)
+        {
+            Transform distal = _fingerJoints != null && _fingerJoints.Length > 0 ? _fingerJoints[0][2] : null;
+            if (distal == null || distal.childCount == 0) return false;
+            _thumbTipCache = distal.GetChild(0);
+        }
+        foreach (var obj in SquishyPinchable.Active)
+            if (obj != null && obj.IsHoldingTip(_thumbTipCache)) return true;
+        return false;
+    }
+
     private void Update()
     {
         Vector3 latestRot;
@@ -442,19 +533,27 @@ public class FingerUDPReceiver : MonoBehaviour
                 for (int i = 0; i < NumBackbonePoints; i++)
                     _currentPoints[i] = Vector2.Lerp(_latestPoints[i], _currentPoints[i], _smoothing);
             }
+            _currentFrameId = _latestFrameId;
             latestRot = _latestRotEuler;
             latestTrans = _latestTranslation;
         }
 
         // Fallback: chi bam theo tay that khi Python bao du lieu hop ly VA goi
         // tin con moi. Neu khong, chuyen dan ve tu the nghi (blend -> 0).
+        _packetThisFrame = _packetArrived;
         if (_packetArrived)
         {
             _packetArrived = false;
             _lastDataTime = Time.time;
         }
         bool dataFresh = (Time.time - _lastDataTime) <= _dataTimeoutSeconds;
-        float blendTarget = (_dataValid && dataFresh && _hasPoints) ? 1f : 0f;
+        bool trusted = _dataValid && dataFresh && _hasPoints;
+        if (trusted) _lastTrustedTime = Time.time;
+        float blendTarget = trusted ? 1f : 0f;
+        // Dang cam vat: mat du lieu ngan thi dong bang dang ngon (goi valid:0 khong
+        // mang diem nen _currentPoints van la diem tot cuoi cung).
+        if (!trusted && IsGrasping() && Time.time - _lastTrustedTime <= _holdPoseWhileGraspingSeconds)
+            blendTarget = _poseBlend;
         float blendStep = Time.deltaTime / Mathf.Max(_fallbackBlendSeconds, 1e-4f);
         _poseBlend = Mathf.MoveTowards(_poseBlend, blendTarget, blendStep);
 
@@ -491,6 +590,7 @@ public class FingerUDPReceiver : MonoBehaviour
     private void LateUpdate()
     {
         ApplyFingerCurl();
+        if (_logDiagnostics && _useBackboneRetarget && _useAnatomicalFit) WriteDiagnostics();
     }
 
     // Goi dung 1 lan, NGAY SAU KHI HandVisual ghi xong toan bo khop cho
@@ -587,11 +687,26 @@ public class FingerUDPReceiver : MonoBehaviour
         Transform view = _viewReference != null ? _viewReference : transform.parent;
         if (view == null) return;
 
+        // Truc cua anh trong the gioi: uu tien truc CAMERA luc chup anh nay; khong
+        // co thi dung truc cua mat (cach cu).
+        Vector3 right = view.right, up = view.up;
+        _usedCameraAxes = false;
+        if (_useCameraAxes && _currentFrameId > 0)
+        {
+            if (_streamer == null) _streamer = FindAnyObjectByType<GloveLiveStreamer>();
+            if (_streamer != null && _streamer.TryGetFramePose(_currentFrameId, out Pose camPose))
+            {
+                right = camPose.rotation * Vector3.right;
+                up = camPose.rotation * Vector3.up;
+                _usedCameraAxes = true;
+            }
+        }
+
         // Diem tu Python da chia cho chieu dai long ban tay TREN ANH. Lam tuong
         // tu voi tay ao: chieu long ban tay ao (huong lay tu Quest) len mat
         // phang nhin -- long ban tay nghieng thi ca 2 ben cung ngan lai nhu nhau.
         Vector3 palm = _rig.middleProximal.position - _wrist.position;
-        Vector2 palmOnImage = new Vector2(Vector3.Dot(palm, view.right), Vector3.Dot(palm, view.up));
+        Vector2 palmOnImage = new Vector2(Vector3.Dot(palm, right), Vector3.Dot(palm, up));
         // Long ban tay gan nhu vuong goc voi mat phang anh -> chieu dai tren anh
         // qua ngan, chia cho no se khuech dai nhieu; chan duoi o 35%.
         float palm2D = Mathf.Max(palmOnImage.magnitude, 0.35f * palm.magnitude);
@@ -601,20 +716,58 @@ public class FingerUDPReceiver : MonoBehaviour
         bool solve = _poseBlend > 0f && Time.frameCount != _lastFitFrame;
         if (solve) _lastFitFrame = Time.frameCount;
 
-        for (int f = 0; f < _fitters.Length; f++)
+        if (solve)
         {
-            FingerChainFitter fitter = _fitters[f];
-            if (fitter == null) continue;
-
-            if (solve)
+            for (int f = 0; f < _fitters.Length; f++)
             {
+                FingerChainFitter fitter = _fitters[f];
+                if (fitter == null) continue;
                 int b = FingerBasePointIndex[f];
                 Vector2 root = _currentPoints[b];
                 fitter.Solve(_currentPoints[b + 1] - root, _currentPoints[b + 2] - root, _currentPoints[b + 3] - root,
-                             view.right, view.up, palm2D);
+                             right, up, palm2D);
             }
-            // Tron ve tu the nghi khi du lieu khong dang tin (giong cach cu)
-            fitter.Apply(_poseBlend);
+            PinchContact(palm.magnitude);
+        }
+
+        // Tron ve tu the nghi khi du lieu khong dang tin (giong cach cu)
+        foreach (var fitter in _fitters) fitter?.Apply(_poseBlend);
+    }
+
+    [Header("Pinch: cho 2 dau ngon AO cham nhau")]
+    [Tooltip("Khoang cach 2 dau ngon TREN ANH (don vi = chieu dai long ban tay) duoi muc nay thi coi la dang chum han -> keo 2 dau ngon ao gap nhau.")]
+    [SerializeField] private float _pinchNearOnImage = 0.2f;
+    [Tooltip("Tren muc nay thi khong keo (dang xoe). O giua thi keo manh dan.")]
+    [SerializeField] private float _pinchFarOnImage = 0.45f;
+    [Tooltip("Khoang cach giua 2 DIEM dau ngon khi cham nhau (met). Diem dau ngon nam trong ngon ~8 mm, nen 2 ngon cham nhau thi 2 diem cach ~1.6 cm.")]
+    [SerializeField] private float _pinchContactDistance = 0.016f;
+
+    /// <summary>Muc do chum ngon cai-tro tren anh (0 = xoe, 1 = chum han).</summary>
+    public float PinchOnImage { get; private set; }
+
+    /// <summary>Ngon cai va ngon tro duoc dung RIENG nen chieu sau lech nhau -> tay
+    /// that chum ma tay ao van ho. Khi anh cho thay 2 dau ngon da chum, keo ca 2
+    /// ve gap nhau tai diem giua (xem FingerChainFitter.RefineTowards).</summary>
+    private void PinchContact(float palm3D)
+    {
+        FingerChainFitter thumb = _fitters.Length > 1 ? _fitters[0] : null;
+        FingerChainFitter index = _fitters.Length > 1 ? _fitters[1] : null;
+        if (thumb == null || index == null) return;
+
+        float gapOnImage = Vector2.Distance(_currentPoints[4], _currentPoints[8]); // don vi: chieu dai long ban tay
+        PinchOnImage = Mathf.Clamp01((_pinchFarOnImage - gapOnImage) / Mathf.Max(_pinchFarOnImage - _pinchNearOnImage, 1e-3f));
+        if (PinchOnImage <= 0f) return;
+
+        // 2 luot xen ke: moi ngon tien ve diem hen tinh tu vi tri MOI NHAT cua ngon kia
+        for (int pass = 0; pass < 2; pass++)
+        {
+            Vector3 tipT = thumb.TipWorld(), tipI = index.TipWorld();
+            Vector3 mid = (tipT + tipI) * 0.5f;
+            Vector3 dir = tipI - tipT;
+            dir = dir.sqrMagnitude > 1e-10f ? dir.normalized : Vector3.right;
+            float half = _pinchContactDistance * 0.5f;
+            thumb.RefineTowards(mid - dir * half, PinchOnImage, palm3D);
+            index.RefineTowards(mid + dir * half, PinchOnImage, palm3D);
         }
     }
 
