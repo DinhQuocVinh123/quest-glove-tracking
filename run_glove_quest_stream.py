@@ -19,6 +19,7 @@ Rồi trong Unity (GloveLiveStreamer), điền đúng IP máy này vào _pcIpAdd
 """
 
 import argparse
+import json
 import os
 import socket
 import struct
@@ -39,7 +40,11 @@ _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(_BASE_DIR, "mmpose", "configs", "hand_2d_keypoint", "rtmpose", "hand5", "rtmpose-m_8xb256-210e_hand5-256x256.py")
 _FINETUNED_CKPT = os.path.join(_BASE_DIR, "checkpoints", "rtmpose_glove_finetuned.pth")
 _ORIGINAL_CKPT_URL = "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/rtmpose-m_simcc-hand5_pt-aic-coco_210e-256x256-74fb594_20230320.pth"
-CHECKPOINT_FILE = _FINETUNED_CKPT if os.path.exists(_FINETUNED_CKPT) else _ORIGINAL_CKPT_URL
+# Model fine-tune cho PINCH voi gang (finetune_pinch.py, 27/09/2026): mat tay khi tay trong anh
+# 12.5% -> 0-3% tren ban ghi thu. Mac dinh dung model nay neu co; --original = model goc (tay tran),
+# --checkpoint = file khac. (_FINETUNED_CKPT la ban fine-tune CU, kem hon model goc -- khong dung mac dinh.)
+_PINCH_CKPT = os.path.join(_BASE_DIR, "checkpoints", "rtmpose_glove_pinch.pth")
+CHECKPOINT_FILE = _PINCH_CKPT if os.path.exists(_PINCH_CKPT) else _ORIGINAL_CKPT_URL
 
 FINGER_TIPS = [4, 8, 12, 16, 20]
 FINGER_MCPS = [1, 5, 9, 13, 17]
@@ -334,6 +339,19 @@ MIN_PALM_FRAME_RATIO = 0.07
 HOLD_LAST_GOOD_FRAMES = 5
 
 
+# Tam ban tay model tim duoc lech khoi vi tri Quest bao (hint) qua bao nhieu lan
+# kich thuoc ban tay thi coi la bam NHAM (vd tay trai). Do tren 2 ban ghi: khung
+# dung lech 0.25-0.36 (p90), toi da 0.51; bam nham tay trai lech 1.5-3.6.
+HINT_MAX_OFFSET = 1.0
+
+
+def hint_offset(kpts, hint):
+    """Khoang cach tam long ban tay (co tay + 4 khop goc ngon) toi hint, chia kich thuoc hint."""
+    hx, hy, hsize = hint
+    center = np.asarray(kpts)[[0, 5, 9, 13, 17], :2].mean(axis=0)
+    return float(np.linalg.norm(center - np.array([hx, hy])) / max(hsize, 1.0))
+
+
 def is_valid_hand(kpts, scores, conf_thr=0.25, frame_shape=None):
     """Tra ve (hop_le, do_tin_cay_loi, ly_do_loai).
 
@@ -391,6 +409,27 @@ def draw_skeleton(img, kpts, scores, score_thr=0.20, thickness=3):
             color = (255, 255, 255) if i == 0 else FINGER_COLORS[min((i - 1) // 4, 4)]
             cv2.circle(img, pt, max(3, thickness + 2), color, -1, cv2.LINE_AA)
             cv2.circle(img, pt, max(4, thickness + 3), (20, 20, 20), 1, cv2.LINE_AA)
+
+
+def draw_protocol(img, state, step, seconds_left, frames_saved):
+    """Chu TO o giua-tren man hinh: dang lam dong tac nao, con bao nhieu giay
+    (du to de doc duoc qua passthrough khi dang deo kinh)."""
+    h, w = img.shape[:2]
+    if state == "wait":
+        line1, color = f"CHUAN BI: dua tay ra truoc mat  ({seconds_left:.0f})", (0, 200, 255)
+        line2 = f"Dau tien: {step[1]}"
+    elif state == "rest":
+        line1, color = f"NGHI - tiep theo ({seconds_left:.0f})", (0, 200, 255)
+        line2 = step[1]
+    elif state == "step":
+        line1, color = f"DANG GHI: {step[0].upper()}  ({seconds_left:.0f})", (0, 0, 255)
+        line2 = step[1]
+    else:
+        line1, color = "XONG KICH BAN - bam q de thoat", (0, 255, 0)
+        line2 = f"Da ghi {frames_saved} khung"
+    cv2.rectangle(img, (0, 110), (w, 200), (0, 0, 0), -1)
+    cv2.putText(img, line1, (20, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3, cv2.LINE_AA)
+    cv2.putText(img, line2, (20, 186), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
 
 
 def draw_hud(img, thumb_joints, index_joints, pinch, fps, sent_ok, spread_amount=0.0, spread_deg=0.0):
@@ -495,6 +534,106 @@ SEARCH_BOX_SCALES = (0.45, 0.70, 0.95)
 # Chay lai 1030 khung ghi that (recordings/20260925_140855): nhan ra tay
 # 85% -> 89% khung, khong nhan nham them luc khong co tay.
 EDGE_PAD_RATIO = 0.25
+
+# Phan dau 24 byte truoc anh JPEG (GloveLiveStreamer.BuildHeader): "GLV1",
+# uint32 so thu tu anh, float32 tam tay x/y (pixel, goc tren-trai), float32 kich
+# thuoc tay (pixel, ~chieu dai long ban tay), uint8 hop le, 3 byte trong.
+HINT_MAGIC = b"GLV1"
+HINT_HEADER = struct.Struct(">4sIfffB3x")
+# Khung tim quanh vi tri goi y: canh = HINT_BOX_SCALE x chieu dai long ban tay
+# (ngon duoi thang dai ~1 long ban tay tinh tu goc ngon, ve moi phia).
+HINT_BOX_SCALE = 2.8
+
+
+# --- Thu du lieu theo kich ban (xem --protocol) ------------------------------
+# Moi buoc: (ma, huong dan hien tren man hinh, so giay). Giua 2 buoc nghi
+# PROTOCOL_REST_SECONDS giay (khong ghi). Tieng bip: 1 tieng = bat dau lam,
+# 2 tieng = dung/nghi, 3 tieng = xong ca kich ban.
+PROTOCOL_SETS = {
+    # Cac dong tac co ban -- de do tung dong tac bam tot toi dau.
+    "basic": [
+        ("xoe_mu",     "XOE TAY - MU BAN TAY huong ve mat, giu yen",          8),
+        ("xoe_long",   "XOE TAY - LONG BAN TAY huong ve mat, giu yen",        8),
+        ("lat",        "LAT QUA LAT LAI cham rai (mu <-> long ban tay)",      15),
+        ("nam",        "NAM TAY - mu ban tay huong ve mat, giu yen",          8),
+        ("nam_xoe",    "NAM - XOE lien tuc, cham rai",                        15),
+        ("pinch_giu",  "PINCH (cai cham tro) - giu yen",                      8),
+        ("pinch_lap",  "PINCH - THA lien tuc, cham rai",                      15),
+        ("pinch_xoay", "PINCH va XOAY co tay cham rai",                       15),
+    ],
+    # Giong CACH DUNG THAT: tay di chuyen, nghieng, ra ria tam nhin, dang cam
+    # bong. Bo "basic" giu tay yen o giua tam nhin nen lac quan hon thuc te --
+    # khi dung that van mat dau luc pinch roi dua bong di, hay xoe tay hoi nghieng.
+    # Nen thu KHI DANG O TRONG UNG DUNG, pinch vao qua bong that.
+    "pinch": [
+        ("xoe_nghieng",  "XOE TAY, nghieng nhe qua lai (trai-phai, truoc-sau)",          15),
+        ("xoe_di",       "XOE TAY, dua cham khap tam nhin: trai, phai, len, xuong",      15),
+        ("pinch_di",     "PINCH qua bong, dua bong cham di khap noi (trai, phai, len, xuong)", 20),
+        ("pinch_gan_xa", "PINCH qua bong, dua lai GAN mat roi ra XA",                    15),
+        ("pinch_xoay",   "PINCH qua bong, XOAY co tay: lat, nghieng len-xuong, trai-phai", 20),
+        ("pinch_lap_di", "PINCH - THA lien tuc trong khi di chuyen tay",                 15),
+        ("pinch_lech",   "PINCH qua bong, NHIN sang cho khac (tay o ria tam nhin)",      15),
+    ],
+    # Rieng NAM TAY o nhieu goc -- dong tac model goc bam kem nhat (ban ghi
+    # 20260926_125425_protocol: gan nhu khong khung nam tay that nao duoc nhan).
+    # Thu de lay du lieu gan nhan / fine-tune.
+    "fist": [
+        ("nam_mu",       "NAM TAY - MU ban tay huong ve mat, giu, nghieng nhe",   10),
+        ("nam_long",     "NAM TAY - LONG ban tay huong ve mat, giu",              10),
+        ("nam_canh",     "NAM TAY - CANH ban tay (ngon cai o tren) ve mat",       10),
+        ("nam_lat",      "NAM TAY va LAT qua lat lai cham rai",                   15),
+        ("nam_xoe_cham", "NAM - XOE that cham (khoang 3 giay moi lan)",           15),
+        ("nam_di",       "NAM TAY, dua tay khap tam nhin: gan, xa, trai, phai",   15),
+    ],
+}
+PROTOCOL_STEPS = PROTOCOL_SETS["basic"]
+PROTOCOL_REST_SECONDS = 4.0
+PROTOCOL_START_DELAY = 8.0   # sau khi kinh ket noi: thoi gian de dua tay vao vi tri
+
+
+class Protocol:
+    """Dieu phoi kich ban thu du lieu theo thoi gian, co tieng bip bao hieu."""
+
+    def __init__(self, repeats, start_time, steps=None):
+        steps = steps or PROTOCOL_STEPS
+        self.steps = [s for _ in range(max(1, repeats)) for s in steps]
+        self.t0 = start_time + PROTOCOL_START_DELAY
+        self._last_phase = None
+
+    def phase(self, t):
+        """Tra ve (trang_thai, buoc, giay_con_lai) voi trang_thai la
+        'wait' / 'rest' / 'step' / 'done'."""
+        if t < self.t0:
+            return "wait", self.steps[0], self.t0 - t
+        elapsed = t - self.t0
+        for i, step in enumerate(self.steps):
+            if i > 0:
+                if elapsed < PROTOCOL_REST_SECONDS:
+                    return "rest", step, PROTOCOL_REST_SECONDS - elapsed
+                elapsed -= PROTOCOL_REST_SECONDS
+            if elapsed < step[2]:
+                return "step", step, step[2] - elapsed
+            elapsed -= step[2]
+        return "done", None, 0.0
+
+    def beep_on_change(self, state, step_idx_key):
+        key = (state, step_idx_key)
+        if key == self._last_phase:
+            return
+        self._last_phase = key
+        pattern = {"step": [880], "rest": [660, 660], "done": [990, 990, 990]}.get(state)
+        if pattern:
+            threading.Thread(target=_beep, args=(pattern,), daemon=True).start()
+
+
+def _beep(freqs):
+    try:
+        import winsound
+        for f in freqs:
+            winsound.Beep(f, 160)
+            time.sleep(0.08)
+    except Exception:
+        print("\a", end="", flush=True)
 SEARCH_STEP_RATIO = 0.5       # buoc nhay = 50% canh o -> cac o chong lan nhau
 
 
@@ -560,6 +699,7 @@ class LatestFrameReader:
         self.conn = conn
         self.buf = bytearray()
         self.timeout = timeout
+        self.last_meta = None  # {"fid": so thu tu anh, "hint": (x, y, kich_thuoc) hoac None}
 
     def _extract_frames(self):
         """Tach cac khung HOAN CHINH dang co trong bo dem, giu lai phan du."""
@@ -602,6 +742,15 @@ class LatestFrameReader:
 
         dropped = len(frames) - 1
         jpg_bytes = frames[-1]  # CHI lay khung moi nhat
+
+        # Phan dau tuy chon (GloveLiveStreamer ban moi): "GLV1" + so thu tu anh +
+        # vi tri/kich thuoc ban tay tren anh (chieu tu co tay Quest bam duoc).
+        # Kinh ban cu khong gui -> ca goi tin la JPEG nhu truoc.
+        self.last_meta = None
+        if jpg_bytes[:4] == HINT_MAGIC and len(jpg_bytes) > HINT_HEADER.size:
+            _, fid, hx, hy, hsize, valid = HINT_HEADER.unpack(jpg_bytes[:HINT_HEADER.size])
+            self.last_meta = {"fid": fid, "hint": (hx, hy, hsize) if valid and hsize > 1 else None}
+            jpg_bytes = jpg_bytes[HINT_HEADER.size:]
         frame = cv2.imdecode(np.frombuffer(jpg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
         if frame is not None:
             # Anh tu kinh dang bi nguoc tren-duoi -- lat lai o day (nhanh hon
@@ -634,6 +783,9 @@ def main():
     else:
         _default_device = "cpu"
     parser.add_argument("--device", type=str, default=_default_device, help="Device: 'cuda', 'mps' or 'cpu'")
+    parser.add_argument("--checkpoint", default="",
+                        help="Duong dan checkpoint rieng (vd checkpoints/rtmpose_glove_pinch.pth tu finetune_pinch.py). "
+                             "Uu tien hon --original.")
     parser.add_argument(
         "--record",
         action="store_true",
@@ -641,14 +793,37 @@ def main():
              "recordings/<thoi gian>/ -- de phan tich sau vi sao mat dau tay, va thu cach sua tren "
              "chinh nhung khung do ma khong can deo kinh lai.",
     )
+    parser.add_argument(
+        "--protocol",
+        action="store_true",
+        help="Thu du lieu theo KICH BAN co san (xoe tay mu/long, lat tay, nam, pinch...), co tieng bip bao "
+             "bat dau/ket thuc tung dong tac. CHI ghi luc dang lam dong tac, moi khung ghi kem ten dong tac "
+             "va 21 diem model doan. Tu bat --record. Xem PROTOCOL_STEPS.",
+    )
+    parser.add_argument("--protocol-repeats", type=int, default=2,
+                        help="So lan lap lai ca kich ban (mac dinh 2).")
+    parser.add_argument("--protocol-set", choices=sorted(PROTOCOL_SETS), default="basic",
+                        help="Bo dong tac: 'basic' (xoe/lat/nam/pinch) hoac 'fist' (nam tay o nhieu goc).")
     args = parser.parse_args()
+    if args.protocol:
+        args.record = True
+        steps = PROTOCOL_SETS[args.protocol_set]
+        total = args.protocol_repeats * (sum(s[2] for s in steps) + PROTOCOL_REST_SECONDS * len(steps))
+        print(f"[PROTOCOL] Bo '{args.protocol_set}': {args.protocol_repeats} lan x {len(steps)} dong tac, "
+              f"khoang {total / 60:.1f} phut. Bat dau {PROTOCOL_START_DELAY:.0f} s sau khi kinh ket noi.")
+        print("  1 bip = BAT DAU lam | 2 bip = NGHI, chuan bi dong tac sau | 3 bip = XONG")
+        for i, (_, text, sec) in enumerate(steps, 1):
+            print(f"  {i}. {text} ({sec} s)")
 
     if args.original:
         CHECKPOINT_FILE = _ORIGINAL_CKPT_URL
+    if args.checkpoint:
+        CHECKPOINT_FILE = args.checkpoint if os.path.isabs(args.checkpoint) else os.path.join(_BASE_DIR, args.checkpoint)
 
     udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    ckpt_source = "FINE-TUNED (glove)" if CHECKPOINT_FILE == _FINETUNED_CKPT else "ORIGINAL (bare-hand only)"
+    ckpt_source = ("ORIGINAL (bare-hand only)" if CHECKPOINT_FILE == _ORIGINAL_CKPT_URL
+                   else os.path.basename(CHECKPOINT_FILE))
     print(f"Loading RTMPose-m on {args.device.upper()}... [{ckpt_source}]")
     model = init_model(CONFIG_FILE, CHECKPOINT_FILE, device=args.device)
 
@@ -701,12 +876,18 @@ def main():
             reader = LatestFrameReader(conn)
 
             # Ghi lai (xem --record): moi lan kinh ket noi la 1 thu muc moi.
-            rec_dir, rec_log, rec_idx = None, None, 0
+            rec_dir, rec_log, rec_kpts, rec_idx = None, None, None, 0
+            protocol = (Protocol(args.protocol_repeats, time.time(), PROTOCOL_SETS[args.protocol_set])
+                        if args.protocol else None)
             if args.record:
-                rec_dir = os.path.join(_BASE_DIR, "recordings", time.strftime("%Y%m%d_%H%M%S"))
+                suffix = f"_protocol_{args.protocol_set}" if protocol else ""
+                rec_dir = os.path.join(_BASE_DIR, "recordings", time.strftime("%Y%m%d_%H%M%S") + suffix)
                 os.makedirs(rec_dir, exist_ok=True)
                 rec_log = open(os.path.join(rec_dir, "log.csv"), "w", encoding="utf-8", buffering=1)
-                rec_log.write("frame,t,found,state,best_conf,sent,reject_reason,fallback_reason\n")
+                rec_log.write("frame,t,pose,found,state,best_conf,sent,reject_reason,fallback_reason,fid,hint\n")
+                # 21 diem model doan cho tung khung da ghi -- de phan tich va de
+                # dien san khi gan nhan (khong can chay lai model).
+                rec_kpts = open(os.path.join(rec_dir, "keypoints.jsonl"), "w", encoding="utf-8", buffering=1)
                 print(f"[RECORD] Dang luu khung hinh vao {rec_dir}")
             mrp_close = 0.0           # muc ep 3 ngon giua/ap ut/ut ve dang nam
             search_grid = None        # luoi o phu kin khung hinh (tao khi biet kich thuoc)
@@ -726,8 +907,17 @@ def main():
                         continue
                     h, w = frame.shape[:2]
 
+                    # Kich ban (--protocol): chi ghi luc dang lam dong tac.
+                    pose = "free"
+                    record_this = rec_dir is not None
+                    if protocol is not None:
+                        p_state, p_step, p_left = protocol.phase(time.time())
+                        protocol.beep_on_change(p_state, p_step[0] if p_step else None)
+                        record_this = record_this and p_state == "step"
+                        pose = p_step[0] if p_state == "step" else p_state
+
                     # Luu anh GOC truoc khi ve khung xuong / chu len.
-                    if rec_dir is not None:
+                    if record_this:
                         rec_idx += 1
                         cv2.imwrite(os.path.join(rec_dir, f"{rec_idx:05d}.jpg"), frame,
                                     [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -761,6 +951,20 @@ def main():
                     # model nhan vao vung lech va cho ra rac -- roi cu lap lai
                     # dung khung hong do suot 12 khung (~1 giay) moi chiu chuyen
                     # sang tim kiem. Gio that bai la tim lai ngay lap tuc.
+                    # 1b. Khung quanh vi tri ban tay kinh GOI Y (chieu tu co tay Quest
+                    # bam duoc). Khi chua bam, day la khung thu DAU TIEN -- khong phai
+                    # do mo ca khung hinh (nguyen nhan cua ~58% so lan mat dau).
+                    meta = reader.last_meta or {}
+                    frame_fid = meta.get("fid", 0)
+                    hint = meta.get("hint")
+                    if hint is not None:
+                        hx, hy, hsize = hint
+                        half = max(hsize * HINT_BOX_SCALE, 140.0) * 0.5
+                        if -pad < hx < w + pad and -pad < hy < h + pad:
+                            candidate_boxes.append(np.array([
+                                max(-pad, hx - half), max(-pad, hy - half),
+                                min(w + pad, hx + half), min(h + pad, hy + half)]))
+
                     if last_known_box is not None:
                         candidate_boxes.append(expand_box(last_known_box, REACQUIRE_EXPAND, w, h, pad))
 
@@ -794,6 +998,15 @@ def main():
                             scores = inst.keypoint_scores[0]
                             valid, core_conf, why = is_valid_hand(
                                 kpts, scores, conf_thr=args.conf_thr, frame_shape=frame.shape)
+                            # Tay tim duoc phai nam DUNG CHO Quest bao tay gang dang o.
+                            # Khong co buoc nay, model bam nham TAY TRAI (tay tran) va
+                            # tay gang ao cu dong theo ngon tay trai (ban ghi
+                            # 20260927_144842: 87 khung "tot" lech > 1.5 lan kich thuoc tay,
+                            # trong khi khung dung chi lech <= 0.36).
+                            if valid and hint is not None:
+                                off = hint_offset(kpts, hint)
+                                if off > HINT_MAX_OFFSET:
+                                    valid, why = False, f"khong trung vi tri tay Quest ({off:.1f}x)"
                             if not valid and core_conf >= best_seen_conf:
                                 reject_reason = why  # ly do cua lan doan TOT NHAT
                             # Nho lai do tin cay CAO NHAT gap trong khung nay, ke
@@ -869,7 +1082,7 @@ def main():
                         send_kpts = apply_mrp_closed_pose(smoothed_kpts, mrp_close)
 
                         msg = (
-                            f"valid:1,"
+                            f"valid:1,fid:{frame_fid},"
                             f"thumb:{thumb_joints[1]:.3f},index:{index_joints[1]:.3f},"
                             f"thumb0:{thumb_joints[0]:.3f},thumb1:{thumb_joints[1]:.3f},thumb2:{thumb_joints[2]:.3f},"
                             f"index0:{index_joints[0]:.3f},index1:{index_joints[1]:.3f},index2:{index_joints[2]:.3f},"
@@ -911,7 +1124,7 @@ def main():
                             # cung. "valid:0" bao Unity chuyen muot ve tu the nghi.
                             udp_sock.sendto(b"valid:0", (quest_ip, args.udp_port))
 
-                    if rec_log is not None:
+                    if record_this:
                         if found_hand:
                             sent = "good"
                         elif last_good_msg is not None and lost_frames <= HOLD_LAST_GOOD_FRAMES:
@@ -919,8 +1132,16 @@ def main():
                         else:
                             sent = "invalid"
                         clean = lambda s: s.replace(",", ";")
-                        rec_log.write(f"{rec_idx},{curr_time:.3f},{int(found_hand)},{state},{best_seen_conf:.3f},"
-                                      f"{sent},{clean(reject_reason)},{clean(fallback_reason)}\n")
+                        rec_log.write(f"{rec_idx},{curr_time:.3f},{pose},{int(found_hand)},{state},{best_seen_conf:.3f},"
+                                      f"{sent},{clean(reject_reason)},{clean(fallback_reason)},{frame_fid},{int(hint is not None)}\n")
+                        # Diem THO cua lan doan duoc chon (ke ca khi bi loai o buoc
+                        # kiem tra hinh dang) -- "found" cho biet co duoc dung khong.
+                        rec_kpts.write(json.dumps({
+                            "frame": rec_idx, "pose": pose, "found": bool(found_hand),
+                            "kpts": None if best_kpts is None else np.round(np.asarray(best_kpts), 1).tolist(),
+                            "scores": None if best_scores is None else np.round(np.asarray(best_scores), 3).tolist(),
+                            "hint": None if hint is None else [round(float(x), 1) for x in hint],
+                        }) + "\n")
 
                     draw_hud(frame, thumb_joints, index_joints, pinch_amount, fps, found_hand,
                              spread_amount, spread_deg)
@@ -953,6 +1174,9 @@ def main():
                                 (20, 74), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                                 (0, 200, 255) if mrp_close > 0.5 else (140, 255, 140), 1, cv2.LINE_AA)
 
+                    if protocol is not None:
+                        draw_protocol(frame, p_state, p_step, p_left, rec_idx)
+
                     cv2.imshow(win_name, frame)
                     key = cv2.waitKey(1) & 0xFF
                     if key in (ord("q"), 27):
@@ -963,6 +1187,7 @@ def main():
                 conn.close()
                 if rec_log is not None:
                     rec_log.close()
+                    rec_kpts.close()
                     print(f"[RECORD] Da luu {rec_idx} khung vao {rec_dir}")
     except KeyboardInterrupt:
         print("\nDung lai.")

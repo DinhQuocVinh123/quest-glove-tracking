@@ -100,8 +100,11 @@ git clone https://github.com/open-mmlab/mmpose.git
 
 ```bash
 # Start the PC first, then launch the app on the headset:
-python run_glove_quest_stream.py --original
+python run_glove_quest_stream.py --record
 ```
+
+It uses `checkpoints/rtmpose_glove_pinch.pth` (see *Fine-tuning for pinch* below) if present,
+otherwise the stock model. `--original` forces the stock model, `--checkpoint <file>` any other.
 
 A debug window shows the detected hand skeleton plus diagnostics (FPS, confidence,
 why a frame was rejected, and so on). The base model **downloads itself** on first run.
@@ -120,13 +123,19 @@ block this — a phone hotspot is the most reliable option.
 
 ## Protocol (if you want to replace either half)
 
-**Headset → PC, TCP port 5007:** repeating `[4-byte big-endian length][JPEG image]`
+**Headset → PC, TCP port 5007:** repeating `[4-byte big-endian length][payload]`. The payload
+is a JPEG, optionally preceded by a 24-byte header `GLV1 | uint32 frame id | float hand x | float
+hand y | float hand size | uint8 valid | 3 pad` (big-endian): where the Quest-tracked glove wrist
+projects into this image. Python searches there first and rejects detections far from it (which
+stops it locking onto the bare left hand), and echoes the frame id back as `fid` so Unity can use
+the camera pose at capture time.
 
 **PC → headset, UDP port 5005:** comma-separated `key:value` text
 
 | Key | Meaning |
 |---|---|
 | `valid` | `1` = data is trustworthy, `0` = return the virtual hand to its rest pose |
+| `fid` | Frame id from the image header this result belongs to |
 | `pts` | 21 points as `x\|y;x\|y;...`, origin at the wrist, scaled by palm length, `+y` is up |
 | `pinch` | 0..1, distance between thumb and index tips |
 | `thumb0/1/2`, `index0/1/2` | Per-joint bend angles (base / middle / tip) |
@@ -147,8 +156,16 @@ block this — a phone hotspot is the most reliable option.
 | `run_white_haptics_glove.py` | Local preview on the PC, no headset required |
 | `dataset_receiver.py` | Receives training samples from `GloveDatasetCollector.cs` |
 
-**Dataset and training tools:**
-`manual_label_quest.py` (hand labelling), `review_quest_import.py`, `review_dataset.py`,
+**Labelling and fine-tuning (current):**
+
+| File | Role |
+|---|---|
+| `auto_label_glove.py` | Auto-labels a `--record` session: keeps good model frames, tracks points through short dropouts with two-way optical flow, queues the rest for review → `labels/auto_labels.jsonl` |
+| `label_glove_frames.py` | Labelling tool (drag pre-filled points; per-point seen / estimated / unknown). `--review-auto` = frames the auto-labeller could not do → `labels/glove_labels.jsonl` |
+| `finetune_pinch.py` | Fine-tunes the stock RTMPose on those labels, with the same crop/padding as at runtime; reports before/after on a time-split hold-out |
+
+**Older dataset and training tools:**
+`manual_label_quest.py`, `review_quest_import.py`, `review_dataset.py`,
 `import_quest_dataset.py`, `run_split_screen_finetune.py`, `finetune_glove.py`
 
 The remaining `run_*.py` files are older experiments, kept for reference. They are
@@ -159,15 +176,26 @@ The remaining `run_*.py` files are older experiments, kept for reference. They a
 
 ---
 
-## Why `--original`
+## Fine-tuning for pinch
 
-This flag forces the **stock pretrained** model instead of our fine-tuned one. That
-sounds backwards, but in a direct comparison the stock model tracked thumb and index
-**noticeably more stably** than a version fine-tuned on our own 170 samples. The likely
-cause is that the dataset was too small and not varied enough, so fine-tuning eroded the
-generalisation the base model already had.
+The first fine-tune (`finetune_glove.py`, 170 samples, `rtmpose_glove_finetuned.pth`) tracked
+**worse** than the stock model, which is why `--original` used to be the recommended flag.
 
-Drop the flag and the script will use `checkpoints/rtmpose_glove_finetuned.pth` if present.
+The second (`finetune_pinch.py` → `rtmpose_glove_pinch.pth`) works. Differences: training crops
+match runtime exactly (padding, hint box); ~270 frames the stock model already got right are kept
+so it does not forget; unknown points are ignored and estimated ones down-weighted; the
+backbone learns 4x slower than the head. Data: one 4-minute free-pinch session, 30
+hand-corrected hard frames. Result on later sessions with a different seat/background:
+dropouts while the hand is in view 12.5% → 0–3%, except a hand resting low at the keyboard
+(not in the training data yet).
+
+```bash
+python auto_label_glove.py recordings/<session>
+python label_glove_frames.py --review-auto --count 30
+python finetune_pinch.py            # close run_glove_quest_stream.py first (2 GB GPU)
+```
+
+Always check on a session that was **not** used for training.
 
 ## Lessons learned (so you don't repeat them)
 
