@@ -138,12 +138,36 @@ public sealed class FingerChainFitter
         // hien tai da sai nhieu). Neu 2 cach gan bang nhau, nhieu nho giua cac
         // khung se lam bo giai doi qua doi lai -> ngon ao giat/meo (do bang
         // glove_diag: 30/39 cu nhay >20 do xay ra khi diem 2D gan nhu khong doi).
-        if (seedCost < cost * SwitchRatio || (cost > BadCost && seedCost < cost))
+        LastCost = cost;
+        if (seedCost < cost * SwitchRatio || (cost > BadCost && seedCost < cost * BadSwitchRatio))
+        {
             System.Array.Copy(_seed, _angles, Params);
+            LastCost = seedCost;
+            Switches++;
+        }
+
+        // Gioi han toc do doi goc moi lan giai: doi cach hieu (hoac diem 2D nhay)
+        // thanh chuyen dong nhanh nhung lien tuc, khong giat 1 khung.
+        if (MaxDegPerSolve > 0f)
+            for (int p = 0; p < Params; p++)
+                _angles[p] = _previous[p] + Mathf.Clamp(_angles[p] - _previous[p], -MaxDegPerSolve, MaxDegPerSolve);
     }
 
-    private const float SwitchRatio = 0.7f; // cach moi phai co sai so thap hon it nhat 30%
-    private const float BadCost = 0.05f;    // cach hien tai sai nhieu hon muc nay thi nhan moi cai tot hon
+    /// <summary>Sai so khop anh cua dap an vua chon (de chan doan).</summary>
+    public float LastCost { get; private set; }
+    /// <summary>So lan doi sang cach hieu khac (de chan doan).</summary>
+    public int Switches { get; private set; }
+
+    // Tinh chinh duoc (static de chay thu tren log); xem Solve.
+    public static float SwitchRatio = 0.7f;    // cach moi phai co sai so thap hon it nhat 30%
+    public static float BadCost = 0.05f;       // cach hien tai sai nhieu hon muc nay ...
+    // ... thi nhan cach moi neu sai so giam it nhat mot NUA. Truoc day la "thap hon la nhan":
+    // voi gang moi ngon cai hay khop anh kem -> doi cach hieu 100 lan/2 phut, giat >20 do
+    // 102 lan (chay lai glove_diag 30/09 11:23). 0.5 + gioi han 10 do/khung: 0 lan.
+    public static float BadSwitchRatio = 0.5f;
+    // Goc doi toi da moi lan giai (do/khung hinh, 72 Hz -> ~720 do/giay, nhanh hon ngon that).
+    // 0 = khong gioi han.
+    public static float MaxDegPerSolve = 10f;
 
     private int _nextSeed;
 

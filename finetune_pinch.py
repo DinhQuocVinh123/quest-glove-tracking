@@ -54,6 +54,7 @@ ORIGINAL_CKPT = ("https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/"
                  "rtmpose-m_simcc-hand5_pt-aic-coco_210e-256x256-74fb594_20230320.pth")
 AUTO_FILE = os.path.join(_BASE_DIR, "labels", "auto_labels.jsonl")
 LABEL_FILE = os.path.join(_BASE_DIR, "labels", "glove_labels.jsonl")
+COLOR_FILE = os.path.join(_BASE_DIR, "labels", "color_labels.jsonl")   # color_label_glove.py
 OUT_CKPT = os.path.join(_BASE_DIR, "checkpoints", "rtmpose_glove_pinch.pth")
 
 EDGE_PAD_RATIO = 0.25          # giong run_glove_quest_stream.py
@@ -74,15 +75,26 @@ def load_runtime_module():
 
 # --- Du lieu ----------------------------------------------------------------
 
-def load_samples(use_claude=False):
+def load_samples(use_claude=False, use_color=True):
     """Tra ve list mau: recording, frame, image, kpts (21,2), weight (21,), hard, hint, full."""
     by_key = {}
+    if use_color and os.path.exists(COLOR_FILE):
+        # Nhan tu bang keo mau: 6 diem co bang (visible 1), diem goc/co tay tu model (visible 2)
+        for line in open(COLOR_FILE, encoding="utf-8"):
+            r = json.loads(line)
+            vis = np.array(r["visible"], np.float32)
+            w = np.where(vis == 1, 1.0, np.where(vis == 2, ESTIMATED_WEIGHT, 0.0)).astype(np.float32)
+            by_key[(r["recording"], r["frame"])] = dict(
+                recording=r["recording"], frame=r["frame"], kpts=np.array(r["kpts"], np.float32),
+                weight=w, hard=bool(r.get("hard")), full=False, source="color")
     if os.path.exists(AUTO_FILE):
         for line in open(AUTO_FILE, encoding="utf-8"):
             r = json.loads(line)
             if r["status"] != "auto" or not r.get("kpts"):
                 continue
             w = np.array(r["visible"], np.float32)
+            if (r["recording"], r["frame"]) in by_key:
+                continue  # da co nhan mau (chinh xac hon nhan tu dong theo model/flow)
             by_key[(r["recording"], r["frame"])] = dict(
                 recording=r["recording"], frame=r["frame"], kpts=np.array(r["kpts"], np.float32),
                 weight=w, hard=r["source"] != "model", full=r["source"] == "model", source=r["source"])
@@ -289,23 +301,39 @@ def main():
     ap.add_argument("--out", default=OUT_CKPT)
     ap.add_argument("--use-claude-labels", action="store_true",
                     help="Dung ca nhan 9 diem Claude dat CHUA duoc nguoi sua (mac dinh: khong).")
+    ap.add_argument("--no-color", action="store_true", help="Khong dung nhan bang keo mau (labels/color_labels.jsonl).")
+    ap.add_argument("--compare", nargs="*", default=[], help="Checkpoint khac de do cung tap kiem tra (vd model dang dung).")
     args = ap.parse_args()
     random.seed(0); np.random.seed(0); torch.manual_seed(0)
 
     rt = load_runtime_module()
-    samples = load_samples(args.use_claude_labels)
+    samples = load_samples(args.use_claude_labels, use_color=not args.no_color)
     train, val = split_by_time(samples)
     n_hard = sum(s["hard"] for s in samples)
-    print(f"{len(samples)} mau ({n_hard} kho, {len(samples) - n_hard} model tot) -> train {len(train)}, kiem tra {len(val)}")
+    n_color = sum(s["source"] == "color" for s in samples)
+    print(f"{len(samples)} mau ({n_hard} kho, {len(samples) - n_hard} model tot, {n_color} nhan mau) "
+          f"-> train {len(train)}, kiem tra {len(val)}")
     val_hard = [s for s in val if s["hard"]]
     val_easy = [s for s in val if not s["hard"]]
+    val_color = [s for s in val if s["source"] == "color"]
+
+    def report(m, tag):
+        print(f"\n{tag}:")
+        r = evaluate(m, val_hard, rt, "kiem tra - khung KHO")
+        evaluate(m, val_easy, rt, "kiem tra - khung de")
+        if val_color:
+            evaluate(m, val_color, rt, "kiem tra - nhan MAU (gang moi)")
+        for d in args.eval_rec:
+            eval_recording(m, d, rt)
+        return r
 
     model = init_model(CONFIG_FILE, ORIGINAL_CKPT, device=args.device)
-    print("\nMODEL GOC:")
-    base_hard = evaluate(model, val_hard, rt, "kiem tra - khung KHO")
-    evaluate(model, val_easy, rt, "kiem tra - khung de")
-    for d in args.eval_rec:
-        eval_recording(model, d, rt)
+    base_hard = report(model, "MODEL GOC")
+    for ck in args.compare:
+        cm = init_model(CONFIG_FILE, ck, device=args.device)
+        report(cm, f"MODEL {os.path.basename(ck)}")
+        del cm
+        torch.cuda.empty_cache()
     if args.eval_only:
         return
 
@@ -352,10 +380,7 @@ def main():
 
     print("\nKET QUA (checkpoint tot nhat, epoch %d):" % best[2] if best else "\nKET QUA:")
     model = init_model(CONFIG_FILE, args.out, device=args.device)
-    evaluate(model, val_hard, rt, "kiem tra - khung KHO")
-    evaluate(model, val_easy, rt, "kiem tra - khung de (khong duoc te hon model goc)")
-    for d in args.eval_rec:
-        eval_recording(model, d, rt)
+    report(model, "MODEL MOI")
     if base_hard:
         print(f"(model goc, khung KHO: dung VA qua kiem tra {100 * base_hard[1]:.0f}%)")
 

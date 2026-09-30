@@ -512,6 +512,8 @@ public class FingerUDPReceiver : MonoBehaviour
         }
         foreach (var obj in SquishyPinchable.Active)
             if (obj != null && obj.IsHoldingTip(_thumbTipCache)) return true;
+        foreach (var body in PhysicsPinchGrabbable.Active)
+            if (body != null && body.IsHoldingTip(_thumbTipCache)) return true;
         return false;
     }
 
