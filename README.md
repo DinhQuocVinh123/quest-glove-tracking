@@ -197,6 +197,28 @@ python finetune_pinch.py            # close run_glove_quest_stream.py first (2 G
 
 Always check on a session that was **not** used for training.
 
+### Automatic labels from colour tape (no hand labelling)
+
+Wrap three rings of matte tape around each finger, centred on the joints: **orange** on the
+thumb (keypoints 2, 3, 4) and **blue** on the index finger (6, 7, 8). The wrist and the two
+finger bases (0, 1, 5) are left untaped. `color_label_glove.py` finds the rings with an HSV
+threshold, groups neighbouring pieces starting from the fingertip the model predicted (or from
+the previous frame's rings when the model lost the hand), and orders them from base to tip. The
+untaped points are copied from the model at weight 0.6, only when the model agrees with the tape.
+The tip ring sits ~1 cm short of the real fingertip, so the tip label is extended along the finger
+by a ratio measured from the data.
+
+```bash
+python run_glove_quest_stream.py --record                 # pinch for a few minutes
+python color_label_glove.py recordings/<session>          # -> labels/color_labels.jsonl + labels/color_sheets/
+python finetune_pinch.py --compare checkpoints/rtmpose_glove_pinch.pth --out checkpoints/rtmpose_glove_pinch_color.pth
+```
+
+First session (new glove, 821 frames, ~1.5 min of pinching): 803 frames labelled, including 111
+frames where the model had lost the hand. On held-out 5-second chunks of the same session, fingertips
+correct: 87% → 99% (colour-labelled frames), 69% → 100% (hard frames); median error 0.068 → 0.019
+hand sizes. A model trained this way relies on the tape, so keep it on the glove.
+
 ## Lessons learned (so you don't repeat them)
 
 - **The headset sends faster than the PC can process.** TCP never drops data — it
