@@ -119,7 +119,13 @@ why a frame was rejected, and so on). The base model **downloads itself** on fir
 as a JPEG to `recordings/<timestamp>/`, with `log.csv` noting per frame whether a hand
 was found and, if not, which check rejected it. You can then replay the frames offline
 to test a fix without putting the headset back on. Recordings are large (~200 MB per
-minute) and are git-ignored.
+minute) and are git-ignored. Frames are written on a background thread, so recording no
+longer slows tracking down.
+
+**Speed:** by default the script skips mmpose's flip test (the model would otherwise run
+twice per frame) and the back-of-hand tile detector, which Unity no longer uses. Measured
+with recorded frames streamed at the headset's 18 fps: 9.9 → 16.9 processed frames/s,
+send-to-result latency 119 → 65 ms. `--flip` and `--dorsal` turn them back on.
 
 **If it won't connect:** the headset and PC must be on the same network, and that
 network must allow devices to talk to each other directly. Corporate networks often
@@ -158,6 +164,7 @@ the camera pose at capture time.
 | File | Role |
 |---|---|
 | `run_glove_quest_stream.py` | **The main script.** Headset camera → PC → Unity |
+| `export_onnx.py` | Exports a checkpoint to ONNX (normalisation + SimCC decoding built in) for running the model on the headset; `--check recordings/<ts>` compares against mmpose |
 | `run_glove_to_unity.py` | Webcam variant, same pipeline |
 | `run_white_haptics_glove.py` | Local preview on the PC, no headset required |
 | `dataset_receiver.py` | Receives training samples from `GloveDatasetCollector.cs` |
