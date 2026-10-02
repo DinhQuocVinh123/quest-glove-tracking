@@ -5,7 +5,8 @@ Quest 3 — using only the headset's own passthrough camera. No external webcam 
 
 Quest's built-in hand tracking fails once you wear a haptic glove. This restores it:
 the headset streams passthrough frames to a PC, the PC runs a hand-pose network
-(RTMPose), and sends the 21 joint positions back to drive the virtual hand.
+(RTMPose), and sends the thumb + index keypoints (pixel coordinates) back; Unity rebuilds
+the virtual hand from those image points.
 
 ## How it works
 
@@ -16,7 +17,7 @@ the headset streams passthrough frames to a PC, the PC runs a hand-pose network
    │ (passthrough camera)├─────────────────>│  • locate the hand       │
    │                     │     port 5007    │  • run RTMPose           │
    │                     │                  │  • reject bad detections │
-   │ FingerUDPReceiver   │  21 pts over UDP │                          │
+   │ FingerUDPReceiver   │ 9 px pts over UDP│                          │
    │ (drives hand bones) │<─────────────────┤                          │
    └─────────────────────┘     port 5005    └──────────────────────────┘
                                    ▲
@@ -42,18 +43,23 @@ path, so it **adds no per-frame latency**.
   with the Meta XR SDK already matches
 - A PC with an **NVIDIA GPU**, on the same network as the headset
 
-### Step 1 — Copy four C# files
+### Step 1 — Copy the C# files
 
 Copy these from `unity/` into your project's `Assets/Scripts/`:
 
 | File | Role |
 |---|---|
 | `GloveLiveStreamer.cs` | Streams passthrough camera frames to the PC |
-| `FingerUDPReceiver.cs` | Receives the 21 points and rotates the hand bones |
-| `FingerChainFitter.cs` | Recovers each finger's 3D pose from the 2D points (used by `FingerUDPReceiver`) |
+| `FingerUDPReceiver.cs` | Receives the 9 image points (wrist, thumb, index) and drives the hand |
+| `ImageHandSolver.cs` | Fits wrist + thumb + index to the image points once per camera frame, smooths between frames (added automatically by `FingerUDPReceiver`) |
+| `HandImageFit.cs` | The solver itself: each point becomes a ray from the camera at capture time; solves wrist pose + 8 finger angles |
+| `FingerChainFitter.cs` | Finger kinematics (joint axes, limits) used by the solver |
 | `HandFingerRig.cs` | Finds the finger bones by their `XRHand_*` names |
 
-(`GloveDatasetCollector.cs` is only needed if you want to capture training data.)
+Optional:
+- `GloveDatasetCollector.cs` — capture training data.
+- `HandPoseRecorder.cs` — logs Quest's tracked bare hand; used to learn natural finger poses.
+- `Editor/HandImageFitBench.cs` — offline replay/tests of the solver (goes in `Assets/Editor/`).
 
 ### Step 2 — Request camera permission
 
@@ -285,7 +291,15 @@ hand sizes. A model trained this way relies on the tape, so keep it on the glove
   almost equally well (finger straight and pointing away vs. curled into the palm), so
   the solver also restarts from a few seed poses; and a strong "stay close to last frame"
   term locks in a wrong first answer — keep it weak and smooth the 2D points instead.
-  Wrist and palm orientation come from Quest hand tracking, not from the image.
+  *(Superseded:)* wrist and palm orientation used to come from Quest hand tracking — but
+  with the glove on, Quest's wrist shakes 4–10 cm / 30–50°. `ImageHandSolver` now solves
+  the wrist **from the image too**: every keypoint is a ray from the camera at capture
+  time, and one solve per camera frame fits wrist pose + thumb/index angles to those rays.
+  Quest only supplies a weak depth hint. Two lessons: (1) natural finger shapes come from a
+  pose prior learned on the user's **bare** hand (which Quest tracks well), not hand-tuned
+  rules; (2) a colour cue on the back of the hand (tan hexagon tiles) was tried and
+  disabled — it latched onto same-coloured objects (desk, boxes, mouse) and bent the
+  virtual index finger when reaching far.
 
 - **The middle, ring and little fingers are occluded by the hand itself during a pinch**,
   and the model guesses wildly there. The Python side forces them into a closed pose

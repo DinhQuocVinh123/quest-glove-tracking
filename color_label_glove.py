@@ -39,7 +39,16 @@ FINGERS = {  # mau bang, diem goc (khong dan), 3 diem co bang [gan, giua, dau ng
     "thumb": dict(color="orange", base=1, joints=[2, 3, 4]),
     "index": dict(color="blue", base=5, joints=[6, 7, 8]),
 }
-MAX_GAP = 5            # khung model mat tay: dung bang cua khung truoc neu cach <= bay nhieu khung
+# Tam bang KHONG trung tam khop (bang phai tranh cac kep ong). Khop = bang + lech x (huong toi
+# bang ke tiep) x khoang cach 2 bang; dau ngon = bang dau + TIP x (bang dau - bang giua).
+# Do 1 LAN tren ban ghi 20260930_160426, so voi khop cua model CU (hoc tu diem nguoi click) o
+# 549/469 khung model dang dung. KHONG do lai bang model da train tren nhan mau (no da hoc tam
+# bang -> lech ~0 -> sai). Khong dich: dot giua ngon cai chi dai 0.41 dot goc (rig: 1.03) ->
+# bo dung ngon 3D trong Unity tuong dot do chia vao camera -> ngon cai ao pose ky.
+BAND_TO_JOINT = {"thumb": (-0.78, +0.20), "index": (-0.09, +0.14)}
+TIP_EXTEND = {"thumb": 0.17, "index": 0.04}
+
+MAX_GAP = 5           # khung model mat tay: dung bang cua khung truoc neu cach <= bay nhieu khung
 MAX_JUMP = 0.25        # diem nhay xa hon (x kich thuoc tay) so voi khung truoc -> bo
 MODEL_AGREE = 0.25     # dau ngon model lech bang mau hon muc nay -> khong tin diem goc cua model
 HARD_ERR = 0.08        # dau ngon model lech hon muc nay (hoac mat tay) -> khung "kho", train lap lai
@@ -50,7 +59,9 @@ HARD_ERR = 0.08        # dau ngon model lech hon muc nay (hoac mat tay) -> khung
 def color_mask(hsv, color):
     h, s, v = (hsv[..., i].astype(np.int32) for i in range(3))
     if color == "blue":   # bang keo giay xanh da troi: H~100, S~130-160
-        m = (h >= 92) & (h <= 110) & (s >= 90) & (v >= 70)
+        # Man hinh nen xanh phia sau (terminal/cua so): H~108-109, S~225-250 -> loai. Truoc day
+        # (H<=110, khong chan S) cong cu nhat nham man hinh lam "bang ngon tro" o goc pinch kho.
+        m = (h >= 92) & (h <= 105) & (s >= 90) & (s <= 200) & (v >= 70)
     else:                 # bang cam: H~6, S~160 (nhua mau da S~55, khong lot vao)
         m = ((h <= 14) | (h >= 172)) & (s >= 120) & (v >= 55)
     m = m.astype(np.uint8)
@@ -231,8 +242,8 @@ def build_labels(rec, found, info, ratio):
         agree = {}
         for fn, b in res.items():
             cfg = FINGERS[fn]
-            tip = b[2] + ratio[fn] * (b[2] - b[1])
-            pts = [b[0], b[1], tip]
+            o0, o1 = BAND_TO_JOINT[fn]
+            pts = [b[0] + o0 * (b[1] - b[0]), b[1] + o1 * (b[2] - b[1]), b[2] + ratio[fn] * (b[2] - b[1])]
             for j, p in zip(cfg["joints"], pts):
                 kp[j] = p
                 vis[j] = 1
@@ -330,7 +341,8 @@ def main():
     all_labels = []
     for rec_dir in recs:
         rec, found, info, reasons = process(rec_dir)
-        ratio, n_ratio = tip_ratio(found, info)
+        measured, n_ratio = tip_ratio(found, info)  # chi de doi chieu; dung hang so TIP_EXTEND
+        ratio = TIP_EXTEND
         labels, rejected = build_labels(rec, found, info, ratio)
         all_labels += labels
         n = len(open(os.path.join(rec_dir, "keypoints.jsonl"), encoding="utf-8").readlines())
@@ -340,7 +352,7 @@ def main():
         print(f"\n[{rec}] {n} khung -> {len(labels)} khung co nhan ({both} du ca 2 ngon), bo {rejected} khung nhay xa")
         print(f"  khung KHO (model lech > {HARD_ERR} hoac mat tay): {hard}, trong do model MAT TAY: {lost}")
         for fn in FINGERS:
-            print(f"  {fn}: dau ngon keo dai {ratio[fn]:.2f} x (tu {n_ratio[fn]} khung) | {reasons[fn]}")
+            print(f"  {fn}: dau ngon keo dai {ratio[fn]:.2f} x (model ban ghi nay: {measured[fn]:.2f}, {n_ratio[fn]} khung) | {reasons[fn]}")
         for p in save_sheets(rec_dir, rec, labels, info):
             print("  bang anh:", p)
 
