@@ -710,6 +710,37 @@ def expand_box(box, factor, w, h, pad=0):
     ])
 
 
+class ImageWriter:
+    """Ghi anh --record o LUONG PHU: imwrite JPEG q95 mat ~19 ms/anh, truoc day nam ngay trong vong
+    lap chinh nen moi anh Unity phai cho them chung ay. OpenCV nha GIL khi nen anh -> chay song song that."""
+
+    def __init__(self, max_pending=240):
+        import queue
+        self._q = queue.Queue(maxsize=max_pending)
+        self.dropped = 0
+        self._t = threading.Thread(target=self._run, daemon=True)
+        self._t.start()
+
+    def put(self, path, img):
+        try:
+            self._q.put_nowait((path, img))
+        except Exception:  # hang doi day (dia qua cham) -> bo anh nay, khong lam cham vong lap chinh
+            self.dropped += 1
+
+    def _run(self):
+        while True:
+            item = self._q.get()
+            if item is None:
+                return
+            cv2.imwrite(item[0], item[1], [cv2.IMWRITE_JPEG_QUALITY, 95])
+
+    def close(self):
+        self._q.put(None)
+        self._t.join(timeout=30)
+        if self.dropped:
+            print(f"[RECORD] Bo {self.dropped} anh vi dia ghi khong kip")
+
+
 class LatestFrameReader:
     """Doc khung hinh tu kinh, LUON tra ve khung MOI NHAT va vut bo khung cu.
 
@@ -821,6 +852,14 @@ def main():
              "chinh nhung khung do ma khong can deo kinh lai.",
     )
     parser.add_argument(
+        "--flip", action="store_true",
+        help="Bat flip test cua mmpose (chay them anh lat ngang roi lay trung binh). Mac dinh TAT tu 02/10: "
+             "model 47 -> 25 ms/anh tren GPU, diem lech trung vi 0.009 long ban tay.")
+    parser.add_argument(
+        "--dorsal", action="store_true",
+        help="Tim cum luc giac tren mu ban tay (18 ms/anh) va gui cho Unity. Mac dinh TAT tu 02/10: "
+             "Unity da tat dung tin hieu nay (ImageHandSolver._useDorsalTiles).")
+    parser.add_argument(
         "--protocol",
         action="store_true",
         help="Thu du lieu theo KICH BAN co san (xoe tay mu/long, lat tay, nam, pinch...), co tieng bip bao "
@@ -853,6 +892,9 @@ def main():
                    else os.path.basename(CHECKPOINT_FILE))
     print(f"Loading RTMPose-m on {args.device.upper()}... [{ckpt_source}]")
     model = init_model(CONFIG_FILE, CHECKPOINT_FILE, device=args.device)
+    if not args.flip:
+        model.test_cfg["flip_test"] = False  # config bat san; tat = nhanh gap doi (xem --flip)
+    print(f"Flip test: {'BAT' if args.flip else 'tat'} | Cum luc giac mu tay: {'BAT' if args.dorsal else 'tat'}")
 
     dummy_img = np.zeros((720, 1280, 3), dtype=np.uint8)
     dummy_box = np.array([[400, 200, 880, 680]])
@@ -904,6 +946,7 @@ def main():
 
             # Ghi lai (xem --record): moi lan kinh ket noi la 1 thu muc moi.
             rec_dir, rec_log, rec_kpts, rec_idx = None, None, None, 0
+            rec_writer = None
             protocol = (Protocol(args.protocol_repeats, time.time(), PROTOCOL_SETS[args.protocol_set])
                         if args.protocol else None)
             if args.record:
@@ -915,6 +958,7 @@ def main():
                 # 21 diem model doan cho tung khung da ghi -- de phan tich va de
                 # dien san khi gan nhan (khong can chay lai model).
                 rec_kpts = open(os.path.join(rec_dir, "keypoints.jsonl"), "w", encoding="utf-8", buffering=1)
+                rec_writer = ImageWriter()
                 print(f"[RECORD] Dang luu khung hinh vao {rec_dir}")
             search_grid = None        # luoi o phu kin khung hinh (tao khi biet kich thuoc)
             search_idx = 0            # o dang quet toi (luan phien qua tung khung)
@@ -945,8 +989,8 @@ def main():
                     # Luu anh GOC truoc khi ve khung xuong / chu len.
                     if record_this:
                         rec_idx += 1
-                        cv2.imwrite(os.path.join(rec_dir, f"{rec_idx:05d}.jpg"), frame,
-                                    [cv2.IMWRITE_JPEG_QUALITY, 95])
+                        # Ghi o luong phu (19 ms/anh) -- frame se bi ve len nen gui ban sao
+                        rec_writer.put(os.path.join(rec_dir, f"{rec_idx:05d}.jpg"), frame.copy())
 
                     curr_time = time.time()
                     fps = 0.90 * fps + 0.10 * (1.0 / max(curr_time - prev_time, 1e-5))
@@ -1090,10 +1134,10 @@ def main():
                         last_known_box = tracked_box.copy()
 
                         # Cum luc giac tren mu ban tay -- tim TRUOC khi ve skeleton len frame
-                        dorsal_ok, dorsal_x, dorsal_y, dorsal_area = detect_dorsal_tiles(frame, smoothed_kpts)
-                        draw_skeleton(frame, smoothed_kpts, best_scores)
-                        if dorsal_ok:
-                            cv2.circle(frame, (int(dorsal_x), int(dorsal_y)), 10, (255, 0, 255), -1)
+                        if args.dorsal:
+                            dorsal_ok, dorsal_x, dorsal_y, dorsal_area = detect_dorsal_tiles(frame, smoothed_kpts)
+                        else:
+                            dorsal_ok, dorsal_x, dorsal_y, dorsal_area = False, 0.0, 0.0, 0.0
 
                         # Goc that tai tung khop (goc/giua/dau) cho rieng ngon cai(1..4)
                         # va ngon tro(5..8), tinh THANG tu hinh dang 4 diem da detect --
@@ -1122,6 +1166,11 @@ def main():
                             msg += ",da:0"
                         last_good_msg = msg.encode("utf-8")
                         udp_sock.sendto(last_good_msg, (quest_ip, args.udp_port))
+
+                        # Ve SAU khi gui -- khong de Unity cho phan hien thi
+                        draw_skeleton(frame, smoothed_kpts, best_scores)
+                        if dorsal_ok:
+                            cv2.circle(frame, (int(dorsal_x), int(dorsal_y)), 10, (255, 0, 255), -1)
 
                         bx1, by1, bx2, by2 = [int(v) for v in tracked_box]
                         cv2.rectangle(frame, (bx1, by1), (bx2, by2), (0, 255, 0), 2)
@@ -1218,6 +1267,8 @@ def main():
                 if rec_log is not None:
                     rec_log.close()
                     rec_kpts.close()
+                if rec_writer is not None:
+                    rec_writer.close()
                     print(f"[RECORD] Da luu {rec_idx} khung vao {rec_dir}")
     except KeyboardInterrupt:
         print("\nDung lai.")
