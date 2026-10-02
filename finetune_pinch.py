@@ -75,13 +75,16 @@ def load_runtime_module():
 
 # --- Du lieu ----------------------------------------------------------------
 
-def load_samples(use_claude=False, use_color=True):
+def load_samples(use_claude=False, use_color=True, color_stride=1):
     """Tra ve list mau: recording, frame, image, kpts (21,2), weight (21,), hard, hint, full."""
     by_key = {}
     if use_color and os.path.exists(COLOR_FILE):
         # Nhan tu bang keo mau: 6 diem co bang (visible 1), diem goc/co tay tu model (visible 2)
         for line in open(COLOR_FILE, encoding="utf-8"):
             r = json.loads(line)
+            # Khung DE ke nhau gan nhu giong het: chi lay 1/color_stride; khung KHO giu het
+            if not r.get("hard") and r["frame"] % color_stride:
+                continue
             vis = np.array(r["visible"], np.float32)
             w = np.where(vis == 1, 1.0, np.where(vis == 2, ESTIMATED_WEIGHT, 0.0)).astype(np.float32)
             by_key[(r["recording"], r["frame"])] = dict(
@@ -303,11 +306,13 @@ def main():
                     help="Dung ca nhan 9 diem Claude dat CHUA duoc nguoi sua (mac dinh: khong).")
     ap.add_argument("--no-color", action="store_true", help="Khong dung nhan bang keo mau (labels/color_labels.jsonl).")
     ap.add_argument("--compare", nargs="*", default=[], help="Checkpoint khac de do cung tap kiem tra (vd model dang dung).")
+    ap.add_argument("--init", default=None, help="Train TIEP tu checkpoint nay thay vi model goc (can it epoch hon).")
+    ap.add_argument("--color-stride", type=int, default=1, help="Nhan mau: khung de chi lay 1/N khung (khung kho giu het).")
     args = ap.parse_args()
     random.seed(0); np.random.seed(0); torch.manual_seed(0)
 
     rt = load_runtime_module()
-    samples = load_samples(args.use_claude_labels, use_color=not args.no_color)
+    samples = load_samples(args.use_claude_labels, use_color=not args.no_color, color_stride=max(1, args.color_stride))
     train, val = split_by_time(samples)
     n_hard = sum(s["hard"] for s in samples)
     n_color = sum(s["source"] == "color" for s in samples)
@@ -327,8 +332,9 @@ def main():
             eval_recording(m, d, rt)
         return r
 
-    model = init_model(CONFIG_FILE, ORIGINAL_CKPT, device=args.device)
-    base_hard = report(model, "MODEL GOC")
+    start_ckpt = args.init or ORIGINAL_CKPT
+    model = init_model(CONFIG_FILE, start_ckpt, device=args.device)
+    base_hard = report(model, "MODEL KHOI DAU (" + os.path.basename(start_ckpt) + ")")
     for ck in args.compare:
         cm = init_model(CONFIG_FILE, ck, device=args.device)
         report(cm, f"MODEL {os.path.basename(ck)}")
@@ -373,7 +379,7 @@ def main():
                 os.makedirs(os.path.dirname(args.out), exist_ok=True)
                 torch.save({"state_dict": model.state_dict(),
                             "meta": {"dataset_meta": model.dataset_meta, "epoch": ep + 1,
-                                     "samples": len(train), "base": ORIGINAL_CKPT}}, args.out)
+                                     "samples": len(train), "base": start_ckpt}}, args.out)
                 print(f"  -> luu {args.out}")
         else:
             print(msg)

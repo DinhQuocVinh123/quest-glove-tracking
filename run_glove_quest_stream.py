@@ -64,10 +64,6 @@ HAND_SKELETON = [
     (0, 17), (17, 18), (18, 19), (19, 20),
 ]
 
-# Fixed bend sent for middle/ring/pinky -- not tracked live (see
-# run_glove_to_unity.py docstring for why).
-FIXED_MRP_BEND = 1.0
-
 PINCH_FAR_RATIO = 1.3
 PINCH_CLOSE_RATIO = 0.15
 PINCH_SMOOTH_ALPHA = 0.3
@@ -172,91 +168,17 @@ def calculate_thumb_index_spread(kpts):
     return float(np.clip(angle / MAX_SPREAD_DEG, 0.0, 1.0)), angle
 
 
-# --- Ep 3 ngon giua/ap ut/ut nam lai khi dang pinch --------------------------
-# Khi pinch, 3 ngon nay bi chinh ban tay che khuat nen model doan rat bay
-# (thieu du lieu fine-tune cho tu the do). Nhung o cac tu the mo (xoe tay, nam
-# tay nhin tu mu ban tay) thi chung lo ro va model bam kha tot.
-#
-# Nen: cang pinch chat thi cang ep chung ve dang nam (bo qua model), con khi
-# khong pinch thi de chung bam theo model nhu binh thuong. Chuyen dan giua 2
-# che do de khong bi giat.
-MRP_FORCE_PINCH_LOW = 0.35    # duoi muc nay: hoan toan tin model
-MRP_FORCE_PINCH_HIGH = 0.60   # tren muc nay: hoan toan ep nam
-MRP_MIN_CONF = 0.35           # do tin cay trung binh toi thieu cua 3 ngon do
-MRP_SMOOTH_ALPHA = 0.25
+# 3 ngon giua/ap ut/ut: model gang moi khong hoc -> khong ve len cua so (Unity luon ep nam).
+MRP_ALWAYS_CLOSED = True
 
 
-def compute_mrp_close_amount(scores, pinch_amount, prev_amount):
-    """Muc do ep 3 ngon giua/ap ut/ut ve dang nam (0 = tin model, 1 = ep nam)."""
-    # 1. Cang pinch chat cang ep nam.
-    span = max(MRP_FORCE_PINCH_HIGH - MRP_FORCE_PINCH_LOW, 1e-4)
-    from_pinch = float(np.clip((pinch_amount - MRP_FORCE_PINCH_LOW) / span, 0.0, 1.0))
-
-    # 2. Du khong pinch, neu model khong nhin ro 3 ngon do thi cung ep nam --
-    # con hon de chung nhay lung tung.
-    mrp_conf = float(np.mean(scores[9:21]))
-    from_conf = 1.0 if mrp_conf < MRP_MIN_CONF else 0.0
-
-    target = max(from_pinch, from_conf)
-    return MRP_SMOOTH_ALPHA * target + (1.0 - MRP_SMOOTH_ALPHA) * prev_amount
-
-
-def apply_mrp_closed_pose(kpts, close_amount):
-    """Tra ve ban sao kpts trong do 3 ngon giua/ap ut/ut duoc gap ve phia long
-    ban tay theo muc close_amount.
-
-    Cach dung: gap ngon ve huong CO TAY. Trong anh 2D nhin tu mu ban tay, mot
-    ngon dang nam se nam ep xuong long ban tay va huong nguoc ve phia co tay --
-    nen day la xap xi don gian ma rat on dinh (khong can biet chieu long ban
-    tay hay tay trai/phai)."""
-    if close_amount <= 1e-3:
-        return kpts
-
-    out = kpts.copy()
-    wrist = kpts[0]
-    palm_len = max(float(np.linalg.norm(kpts[9] - wrist)), 1e-4)
-
-    # Ty le chieu dai tung dot khi gap (so voi long ban tay).
-    seg_ratios = (0.34, 0.26, 0.20)
-
-    for base in (9, 13, 17):  # giua, ap ut, ut
-        mcp = kpts[base]      # khop goc -- diem nay model van thay ro ke ca khi pinch
-        to_wrist = wrist - mcp
-        n = float(np.linalg.norm(to_wrist))
-        if n < 1e-4:
-            continue
-        to_wrist = to_wrist / n
-
-        pos = mcp.copy()
-        for j, ratio in enumerate(seg_ratios):
-            pos = pos + to_wrist * (ratio * palm_len)
-            # Tron dan giua vi tri that (model) va vi tri gap, de khong bi giat.
-            out[base + 1 + j] = (1.0 - close_amount) * kpts[base + 1 + j] + close_amount * pos
-
-    return out
-
-
-def build_points_payload(kpts):
-    """Goi 21 diem THO (co tay + 4 diem moi ngon) de Unity tu xoay tung dot
-    xuong chia dung huong doan backbone tuong ung.
-
-    Day la cach duy nhat tai tao dung HINH DANG ngon tay: xoay tung khop
-    quanh 1 truc co dinh (cach cu) khong the tao ra huong bat ky trong mat
-    phang, nen hinh dang khong bao gio khop duoc du goc tinh co chuan.
-
-    Toa do duoc chuan hoa: goc toa do tai CO TAY, chia cho chieu dai long
-    ban tay (nen khong phu thuoc tay o gan/xa camera), va DOI DAU truc y
-    (anh co y tang xuong duoi, Unity co +y huong LEN TREN).
-    Dinh dang: "x|y;x|y;..." (9 diem, khong chua dau phay de khong pha
-    dinh dang key:value phan cach bang dau phay cua goi UDP)."""
-    wrist = kpts[0]
-    palm_len = max(float(np.linalg.norm(kpts[9] - wrist)), 1e-4)
-    parts = []
-    for i in range(21):  # 0=co tay, 1-4=cai, 5-8=tro, 9-12=giua, 13-16=ap ut, 17-20=ut
-        dx = (kpts[i][0] - wrist[0]) / palm_len
-        dy = -(kpts[i][1] - wrist[1]) / palm_len
-        parts.append(f"{dx:.3f}|{dy:.3f}")
-    return ";".join(parts)
+def build_pixel_payload(kpts, scores, w, h):
+    """9 diem dau (co tay, ngon cai 1-4, ngon tro 5-8) theo TI LE ANH: x/rong, y/cao (goc tren-trai)
+    + do tin cay tung diem. Unity (ImageHandSolver) doi moi diem thanh 1 TIA tu camera luc chup va
+    khop ca ban tay ao vao 9 tia."""
+    pv = ";".join(f"{kpts[i][0] / w:.4f}|{kpts[i][1] / h:.4f}" for i in range(9))
+    pc = ";".join(f"{float(scores[i]):.2f}" for i in range(9))
+    return pv, pc
 
 
 # --- Kiem tra dang tay co HOP LY khong (fallback ve tay binh thuong) ---------
@@ -282,32 +204,52 @@ FINGER_MAX_RATIO = 2.00         # ca ngon dai nhat = 200% long ban tay
 MAX_JUMP_RATIO = 1.20           # 1 diem khong the nhay qua 120% long ban tay trong 1 khung
 
 
-def is_pose_plausible(kpts, scores, prev_kpts=None):
+def palm_length(kpts):
+    """Chieu dai long ban tay = co tay -> khop goc ngon TRO (diem 5). Truoc dung diem 9 (ngon
+    giua) -- model gang moi khong hoc 3 ngon giua/ap ut/ut nen diem 9 khong dang tin. Tren tay
+    that |0-5| ~ |0-9| (do 0.95-1.0) nen cac nguong cu van dung."""
+    return float(np.linalg.norm(np.asarray(kpts[5]) - np.asarray(kpts[0])))
+
+
+def is_pose_plausible(kpts, scores, prev_kpts=None, bad_points=None):
     """Kiem tra rieng dang NGON CAI + NGON TRO co hop ly ve giai phau khong.
 
     Khac voi is_valid_hand (chi xet co tay + cac khop GOC), ham nay xet chinh
     cac diem tao nen hinh dang ngon tay -- ke ca dau ngon. Do la lo hong khien
     khung hinh co khop goc ro nhung dau ngon doan bay van lot qua.
 
+    bad_points (set): neu dua vao, 1 dot sai chieu dai tren moi ngon KHONG lam loai ca khung --
+    diem dau ngoai cua dot do duoc ghi vao set (gui do tin cay 0, Unity ImageHandSolver bo qua diem
+    do, xuong co chieu dai co dinh nen van dung duoc ngon). Ban ghi 01/10 16:58: 61/538 khung bi
+    loai chi vi 1 dot (thuong do long ban tay nghieng lam |0-5| tren anh ngan lai).
+
     Tra ve (hop_ly, ly_do)."""
     wrist = kpts[0]
-    palm_len = float(np.linalg.norm(kpts[9] - wrist))
+    palm_len = palm_length(kpts)
     if palm_len < 1e-4:
         return False, "long ban tay ~ 0"
 
-    # 1. Do tin cay cua TUNG diem tren 2 ngon (ke ca dau ngon).
-    for i in (1, 2, 3, 4, 5, 6, 7, 8):
+    # 1. Do tin cay cua TUNG diem tren 2 ngon (ke ca dau ngon). Bo diem 1, 2 (goc / khop gan goc
+    # ngon cai): nhan da duoc dich tu tam bang ve tam khop nen model cham diem tu tin thap hon du
+    # vi tri van dung -- ban ghi 01/10 16:03: 361/602 khung bi loai oan vi 2 diem nay.
+    for i in (3, 4, 5, 6, 7, 8):
         if scores[i] < FINGER_POINT_CONF_THR:
             return False, f"diem {i} do tin cay thap ({scores[i]:.2f})"
 
     # 2. Tung dot xuong phai co chieu dai hop ly so voi long ban tay.
     for base, name in ((1, "cai"), (5, "tro")):
         total = 0.0
+        flagged = []
         for j in range(3):
             seg = float(np.linalg.norm(kpts[base + j + 1] - kpts[base + j]))
             total += seg
             if seg < SEG_MIN_RATIO * palm_len or seg > SEG_MAX_RATIO * palm_len:
-                return False, f"dot {j} ngon {name} dai bat thuong"
+                flagged.append(base + j + 1)
+        if flagged and (bad_points is None or len(flagged) > 1):
+            return False, f"dot {flagged[0] - base - 1} ngon {name} dai bat thuong"
+        if flagged:
+            bad_points.update(flagged)
+            continue
         # 3. Tong chieu dai ca ngon cung phai hop ly.
         if total < FINGER_MIN_RATIO * palm_len or total > FINGER_MAX_RATIO * palm_len:
             return False, f"ngon {name} dai bat thuong"
@@ -345,6 +287,90 @@ HOLD_LAST_GOOD_FRAMES = 5
 HINT_MAX_OFFSET = 1.0
 
 
+TAPE_HINT_MAX_OFFSET = 2.5  # co bang keo mau o dau ngon: chap nhan lech Quest toi muc nay
+
+
+def tape_near_tips(frame, kpts):
+    """Quanh dau ngon cai (diem 4) co bang CAM, hoac quanh dau ngon tro (diem 8) co bang XANH
+    khong -- dau hieu chac chan day la tay deo gang (cung nguong mau voi color_label_glove.py)."""
+    palm = palm_length(kpts)
+    r = int(max(12, 0.25 * palm))
+    for idx, color in ((4, "orange"), (8, "blue")):
+        x, y = int(kpts[idx][0]), int(kpts[idx][1])
+        x0, y0 = max(0, x - r), max(0, y - r)
+        x1, y1 = min(frame.shape[1], x + r), min(frame.shape[0], y + r)
+        if x1 - x0 < 4 or y1 - y0 < 4:
+            continue
+        hsv = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+        h, s, v = (hsv[..., i].astype(np.int32) for i in range(3))
+        if color == "blue":
+            m = (h >= 92) & (h <= 105) & (s >= 90) & (s <= 200) & (v >= 70)
+        else:
+            m = ((h <= 14) | (h >= 172)) & (s >= 120) & (v >= 55)
+        if m.mean() > 0.04:
+            return True
+    return False
+
+
+# Cum mieng luc giac mau be tren mu ban tay gang (tren khop goc 3 ngon dang nam). 9 diem co tay /
+# ngon cai / ngon tro gan nhu khong cho biet ban tay LAT bao nhieu -> Unity (ImageHandSolver) dung
+# tam cum nay nhu diem thu 10, va "khong thay cum" = mu ban tay khong quay ve camera.
+# Mau do tren ban ghi 01/10 17:45: luc giac H 11-30, S ~40-85, V sang; da tay tran dam mau hon
+# (S 80-105) va toi hon; vai gang trang ngả xanh (H ~103).
+TILE_HSV_LO = (8, 25, 95)
+TILE_HSV_HI = (28, 80, 255)
+TILE_MIN_AREA = 0.05  # dien tich cum / (chieu dai long ban tay)^2
+
+
+def _seg_dist(px, a, b):
+    ab = b - a
+    t = np.clip(((px - a) @ ab) / max(float(ab @ ab), 1e-6), 0, 1)
+    return np.linalg.norm(px - (a + t[:, None] * ab), axis=1)
+
+
+def detect_dorsal_tiles(frame, kpts):
+    """Tim cum luc giac quanh ban tay gang (KHONG xet toan anh -- tay trai tran cung mau gan giong).
+    Tra ve (tim_thay, cx, cy, dien_tich / palm^2). Goi TRUOC khi ve skeleton len frame."""
+    k = np.asarray(kpts, dtype=float)
+    p0, p5 = k[0], k[5]
+    L = float(np.linalg.norm(p5 - p0))
+    if L < 20:
+        return False, 0.0, 0.0, 0.0
+    u = (p5 - p0) / L
+    v = np.array([-u[1], u[0]])
+    h, w = frame.shape[:2]
+    c = p0 + u * 0.9 * L
+    r = 1.3 * L
+    x0, y0 = int(max(0, c[0] - r)), int(max(0, c[1] - r))
+    x1, y1 = int(min(w, c[0] + r)), int(min(h, c[1] + r))
+    if x1 - x0 < 10 or y1 - y0 < 10:
+        return False, 0.0, 0.0, 0.0
+    mask = cv2.inRange(cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2HSV), TILE_HSV_LO, TILE_HSV_HI)
+    ys, xs = np.nonzero(mask)
+    if len(xs) == 0:
+        return False, 0.0, 0.0, 0.0
+    px = np.stack([xs + x0, ys + y0], 1).astype(float)
+    rel = px - p0
+    a, b = rel @ u, rel @ v
+    keep = (a > 0.35 * L) & (a < 1.7 * L) & (np.abs(b) < 1.1 * L)
+    for chain in ((1, 2, 3, 4), (5, 6, 7, 8)):  # bo cac mieng dem tren ngon cai / ngon tro
+        for i, j in zip(chain, chain[1:]):
+            keep &= _seg_dist(px, k[i], k[j]) > 0.14 * L
+    m2 = np.zeros_like(mask)
+    sel = px[keep].astype(int)
+    m2[sel[:, 1] - y0, sel[:, 0] - x0] = 255
+    m2 = cv2.morphologyEx(m2, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    n, _, stats, cent = cv2.connectedComponentsWithStats(m2)
+    if n <= 1:
+        return False, 0.0, 0.0, 0.0
+    best = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    area = stats[best, cv2.CC_STAT_AREA] / (L * L)
+    if area < TILE_MIN_AREA:
+        return False, 0.0, 0.0, float(area)
+    cx, cy = cent[best]
+    return True, float(cx + x0), float(cy + y0), float(area)
+
+
 def hint_offset(kpts, hint):
     """Khoang cach tam long ban tay (co tay + 4 khop goc ngon) toi hint, chia kich thuoc hint."""
     hx, hy, hsize = hint
@@ -365,12 +391,13 @@ def is_valid_hand(kpts, scores, conf_thr=0.25, frame_shape=None):
     tra HINH DANG ky hon (chieu dai tung dot, tong chieu dai ngon, nhay dot
     ngot) o buoc sau."""
     wrist = kpts[0]
-    core_scores = scores[[0, 1, 5, 9, 13, 17]]
+    # Chi xet co tay + goc ngon cai/tro -- 3 ngon giua/ap ut/ut model gang moi khong hoc
+    core_scores = scores[[0, 1, 5]]
     core_conf = float(np.mean(core_scores))
     if core_conf < conf_thr:
         return False, core_conf, f"do tin cay {core_conf:.2f} < {conf_thr:.2f}"
 
-    palm_len = np.linalg.norm(kpts[9] - wrist)
+    palm_len = palm_length(kpts)
     if palm_len < 15.0:  # truoc: 30.0
         return False, core_conf, f"long ban tay qua nho ({palm_len:.0f}px)"
 
@@ -383,11 +410,7 @@ def is_valid_hand(kpts, scores, conf_thr=0.25, frame_shape=None):
             return False, core_conf, (f"tay qua nho so voi khung hinh "
                                       f"({ratio * 100:.0f}% < {MIN_PALM_FRAME_RATIO * 100:.0f}%)")
 
-    knuckle_span = np.linalg.norm(kpts[17] - kpts[5])
-    if knuckle_span < 8.0:  # truoc: 20.0 -- nhin nghieng thi cac dot chum lai
-        return False, core_conf, f"be ngang ban tay qua nho ({knuckle_span:.0f}px)"
-    if knuckle_span > palm_len * 2.6:  # truoc: 2.2
-        return False, core_conf, f"be ngang ban tay qua lon ({knuckle_span / palm_len:.1f}x)"
+    # (Bo kiem tra be ngang ban tay |17-5|: can diem ngon ut, model gang moi khong hoc.)
 
     thumb_tip_dist = np.linalg.norm(kpts[4] - kpts[1])
     if thumb_tip_dist > palm_len * 2.6:  # truoc: 2.0
@@ -398,12 +421,16 @@ def is_valid_hand(kpts, scores, conf_thr=0.25, frame_shape=None):
 
 def draw_skeleton(img, kpts, scores, score_thr=0.20, thickness=3):
     for bone_idx, (start, end) in enumerate(HAND_SKELETON):
+        if MRP_ALWAYS_CLOSED and bone_idx // 4 >= 2:
+            continue  # bo qua 3 ngon giua/ap ut/ut
         if scores[start] > score_thr and scores[end] > score_thr:
             pt1 = (int(kpts[start][0]), int(kpts[start][1]))
             pt2 = (int(kpts[end][0]), int(kpts[end][1]))
             color = FINGER_COLORS[min(bone_idx // 4, 4)]
             cv2.line(img, pt1, pt2, color, thickness, cv2.LINE_AA)
     for i, (x, y) in enumerate(kpts):
+        if MRP_ALWAYS_CLOSED and i >= 9:
+            continue
         if scores[i] > score_thr:
             pt = (int(x), int(y))
             color = (255, 255, 255) if i == 0 else FINGER_COLORS[min((i - 1) // 4, 4)]
@@ -889,7 +916,6 @@ def main():
                 # dien san khi gan nhan (khong can chay lai model).
                 rec_kpts = open(os.path.join(rec_dir, "keypoints.jsonl"), "w", encoding="utf-8", buffering=1)
                 print(f"[RECORD] Dang luu khung hinh vao {rec_dir}")
-            mrp_close = 0.0           # muc ep 3 ngon giua/ap ut/ut ve dang nam
             search_grid = None        # luoi o phu kin khung hinh (tao khi biet kich thuoc)
             search_idx = 0            # o dang quet toi (luan phien qua tung khung)
             last_known_box = None     # vi tri cuoi cung thay tay -- de tim lai cho nhanh
@@ -1005,7 +1031,10 @@ def main():
                             # trong khi khung dung chi lech <= 0.36).
                             if valid and hint is not None:
                                 off = hint_offset(kpts, hint)
-                                if off > HINT_MAX_OFFSET:
+                                # Quest nhin gang moi hay lech xa (p90 ~1.1 kich thuoc tay) -> truoc day
+                                # loai oan khung DUNG dung luc can anh nhat. Thay bang keo cam/xanh o dau
+                                # ngon thi chac chan la tay gang (tay trai tran khong co) -> van nhan.
+                                if off > HINT_MAX_OFFSET and not (off <= TAPE_HINT_MAX_OFFSET and tape_near_tips(frame, kpts)):
                                     valid, why = False, f"khong trung vi tri tay Quest ({off:.1f}x)"
                             if not valid and core_conf >= best_seen_conf:
                                 reject_reason = why  # ly do cua lan doan TOT NHAT
@@ -1021,13 +1050,15 @@ def main():
 
                     thumb_joints = [0.0, 0.0, 0.0]
                     index_joints = [0.0, 0.0, 0.0]
+                    bad_points = set()
                     spread_amount, spread_deg = 0.0, 0.0
 
                     # Dang tay co hop ly khong? Neu khong, coi nhu khong tim thay
                     # tay: Unity se chuyen muot ve tu the nghi thay vi hien dang
                     # cong venh/lat nguoc.
                     if found_hand and best_kpts is not None:
-                        plausible, reason = is_pose_plausible(best_kpts, best_scores, prev_kpts)
+                        bad_points = set()
+                        plausible, reason = is_pose_plausible(best_kpts, best_scores, prev_kpts, bad_points)
                         if not plausible:
                             found_hand = False
                             fallback_reason = reason
@@ -1048,7 +1079,7 @@ def main():
                         min_x, max_x = np.min(smoothed_kpts[:, 0]), np.max(smoothed_kpts[:, 0])
                         min_y, max_y = np.min(smoothed_kpts[:, 1]), np.max(smoothed_kpts[:, 1])
                         cx, cy = (min_x + max_x) / 2.0, (min_y + max_y) / 2.0
-                        palm_len = np.linalg.norm(smoothed_kpts[9] - smoothed_kpts[0])
+                        palm_len = palm_length(smoothed_kpts)
                         box_side = max((max_x - min_x) * 1.35, (max_y - min_y) * 1.35, palm_len * 2.8, 140.0)
                         half = box_side / 2.0
                         new_box = np.array([max(-pad, cx - half), max(-pad, cy - half),
@@ -1058,7 +1089,11 @@ def main():
                         # tim lai truoc, thay vi quet lai tu dau ca khung hinh.
                         last_known_box = tracked_box.copy()
 
+                        # Cum luc giac tren mu ban tay -- tim TRUOC khi ve skeleton len frame
+                        dorsal_ok, dorsal_x, dorsal_y, dorsal_area = detect_dorsal_tiles(frame, smoothed_kpts)
                         draw_skeleton(frame, smoothed_kpts, best_scores)
+                        if dorsal_ok:
+                            cv2.circle(frame, (int(dorsal_x), int(dorsal_y)), 10, (255, 0, 255), -1)
 
                         # Goc that tai tung khop (goc/giua/dau) cho rieng ngon cai(1..4)
                         # va ngon tro(5..8), tinh THANG tu hinh dang 4 diem da detect --
@@ -1074,23 +1109,17 @@ def main():
                         raw_pinch = float(np.clip(raw_pinch, 0.0, 1.0))
                         pinch_amount = PINCH_SMOOTH_ALPHA * raw_pinch + (1 - PINCH_SMOOTH_ALPHA) * pinch_amount
 
-                        # Khi pinch (hoac khi model khong nhin ro), ep 3 ngon
-                        # giua/ap ut/ut ve dang nam thay vi tin du doan cua model.
-                        # Lam ngay tren toa do diem truoc khi gui -- Unity khong
-                        # can biet gi, cu bam backbone nhu binh thuong.
-                        mrp_close = compute_mrp_close_amount(best_scores, pinch_amount, mrp_close)
-                        send_kpts = apply_mrp_closed_pose(smoothed_kpts, mrp_close)
-
-                        msg = (
-                            f"valid:1,fid:{frame_fid},"
-                            f"thumb:{thumb_joints[1]:.3f},index:{index_joints[1]:.3f},"
-                            f"thumb0:{thumb_joints[0]:.3f},thumb1:{thumb_joints[1]:.3f},thumb2:{thumb_joints[2]:.3f},"
-                            f"index0:{index_joints[0]:.3f},index1:{index_joints[1]:.3f},index2:{index_joints[2]:.3f},"
-                            f"spread:{spread_amount:.3f},"
-                            f"pts:{build_points_payload(send_kpts)},"
-                            f"middle:{FIXED_MRP_BEND:.3f},ring:{FIXED_MRP_BEND:.3f},pinky:{FIXED_MRP_BEND:.3f},"
-                            f"pinch:{pinch_amount:.3f}"
-                        )
+                        # Goi tin cho Unity (FingerUDPReceiver / ImageHandSolver): 9 diem theo ti le anh + do tin
+                        # cay (diem co dot sai chieu dai gui 0 -> Unity bo qua), cum luc giac tren mu ban tay.
+                        send_scores = np.array(best_scores, dtype=float)
+                        for i in bad_points:
+                            send_scores[i] = 0.0
+                        pv, pc = build_pixel_payload(smoothed_kpts, send_scores, w, h)
+                        msg = f"valid:1,fid:{frame_fid},pv:{pv},pc:{pc}"
+                        if dorsal_ok:
+                            msg += f",dv:{dorsal_x / w:.4f}|{dorsal_y / h:.4f},da:{dorsal_area:.3f}"
+                        else:
+                            msg += ",da:0"
                         last_good_msg = msg.encode("utf-8")
                         udp_sock.sendto(last_good_msg, (quest_ip, args.udp_port))
 
@@ -1141,6 +1170,7 @@ def main():
                             "kpts": None if best_kpts is None else np.round(np.asarray(best_kpts), 1).tolist(),
                             "scores": None if best_scores is None else np.round(np.asarray(best_scores), 3).tolist(),
                             "hint": None if hint is None else [round(float(x), 1) for x in hint],
+                            "dorsal": [round(dorsal_x, 1), round(dorsal_y, 1), round(dorsal_area, 3)] if found_hand and dorsal_ok else None,
                         }) + "\n")
 
                     draw_hud(frame, thumb_joints, index_joints, pinch_amount, fps, found_hand,
@@ -1169,10 +1199,10 @@ def main():
                     cv2.putText(frame, f"Do tin cay: {best_seen_conf:.2f} / nguong {args.conf_thr:.2f}",
                                 (20, 96), cv2.FONT_HERSHEY_SIMPLEX, 0.45, conf_color, 1, cv2.LINE_AA)
 
-                    mrp_txt = "EP NAM" if mrp_close > 0.5 else "bam theo model"
-                    cv2.putText(frame, f"3 ngon giua/ap ut/ut: {mrp_txt} ({mrp_close:.2f})",
+                    tile_txt = "THAY (cham tim)" if found_hand and dorsal_ok else "khong thay"
+                    cv2.putText(frame, f"Cum luc giac mu ban tay: {tile_txt}",
                                 (20, 74), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
-                                (0, 200, 255) if mrp_close > 0.5 else (140, 255, 140), 1, cv2.LINE_AA)
+                                (255, 0, 255) if found_hand and dorsal_ok else (180, 180, 180), 1, cv2.LINE_AA)
 
                     if protocol is not None:
                         draw_protocol(frame, p_state, p_step, p_left, rec_idx)

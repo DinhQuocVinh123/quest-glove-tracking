@@ -66,6 +66,7 @@ public class GloveLiveStreamer : MonoBehaviour
     [Tooltip("Tam ban tay (XRHand_MiddleProximal) va co tay (XRHand_Wrist) cua tay gang. De trong = tu tim.")]
     [SerializeField] private Transform _handCenter;
     [SerializeField] private Transform _handWrist;
+    private FingerUDPReceiver _gloveReceiver;
 
     [Header("Feedback (tuỳ chọn -- kéo 1 TextMeshPro vào đây để xem trạng thái ngay trong kính)")]
     [SerializeField] private TMPro.TextMeshPro _statusText;
@@ -109,12 +110,39 @@ public class GloveLiveStreamer : MonoBehaviour
     private readonly byte[] _header = new byte[24];
     private volatile int _headerLength; // 0 = khong gui phan dau (luong phu doc)
 
+    // Tam tay (khop goc ngon giua) + chieu dai long ban tay THEO QUEST luc chup tung anh -- chinh
+    // la cho "goi y" gui Python (vung tim tay). ImageHandSolver lay chieu sau tam tay o day lam goi y.
+    private readonly Vector3[] _hintCenters = new Vector3[PoseHistory];
+    private readonly float[] _hintPalms = new float[PoseHistory];
+    private readonly bool[] _hintOk = new bool[PoseHistory];
+
     /// <summary>Huong camera luc chup anh so frameId (neu con trong bo nho gan day).</summary>
     public bool TryGetFramePose(int frameId, out Pose pose)
     {
         int slot = ((frameId % PoseHistory) + PoseHistory) % PoseHistory;
         pose = _poses[slot];
         return frameId > 0 && _poseIds[slot] == frameId;
+    }
+
+    /// <summary>Tam tay va chieu dai long ban tay theo Quest luc chup anh frameId (diem goi y).</summary>
+    public bool TryGetFrameHint(int frameId, out Vector3 center, out float palm)
+    {
+        int slot = ((frameId % PoseHistory) + PoseHistory) % PoseHistory;
+        center = _hintCenters[slot];
+        palm = _hintPalms[slot];
+        return frameId > 0 && _poseIds[slot] == frameId && _hintOk[slot];
+    }
+
+    /// <summary>Tia tu camera (dung vi tri/huong LUC CHUP anh frameId) xuyen qua 1 diem tren anh.
+    /// uv = (x / chieu rong, y / chieu cao) tinh tu goc TREN-trai -- dung nhu anh Python nhan duoc.</summary>
+    public bool TryGetFrameRay(int frameId, Vector2 uv, out Ray ray)
+    {
+        ray = default;
+        if (_passthroughCamera == null || !_passthroughCamera.IsPlaying || !TryGetFramePose(frameId, out Pose cam))
+            return false;
+        // Viewport cua Meta: goc DUOI-trai (0,0) -> lat truc y (giong BuildHeader)
+        ray = _passthroughCamera.ViewportPointToRay(new Vector2(uv.x, 1f - uv.y), cam);
+        return true;
     }
 
     /// <summary>Phan dau 24 byte truoc anh JPEG (big-endian, khop run_glove_quest_stream.py):
@@ -127,20 +155,31 @@ public class GloveLiveStreamer : MonoBehaviour
         if (_handCenter != null && _handWrist != null && _gloveHandVisual != null &&
             _gloveHandVisual.Hand != null && _gloveHandVisual.Hand.IsTrackedDataValid)
         {
-            Vector3 center = _handCenter.position;
+            Vector3 center = _handCenter.position, wristPos = _handWrist.position;
+            // Tay ao co the da bi FingerUDPReceiver dich/xoay theo anh -> dung vi tri THEO QUEST (chua
+            // sua) de Python do duoc dung do lech cua Quest, khong phai phan con lai sau khi sua.
+            if (_gloveReceiver != null && _gloveReceiver.TryGetRawHandPose(out Vector3 rc, out Vector3 rw))
+            {
+                center = rc;
+                wristPos = rw;
+            }
             float depth = Vector3.Dot(center - camPose.position, camPose.rotation * Vector3.forward);
             if (depth > 0.05f)
             {
                 // Viewport cua Meta: goc DUOI-trai (0,0) -> anh Python nhan duoc dung chieu, goc TREN-trai
                 Vector2 vc = _passthroughCamera.WorldToViewportPoint(center, camPose);
-                float palm = Vector3.Distance(center, _handWrist.position);
+                float palm = Vector3.Distance(center, wristPos);
                 Vector2 vs = _passthroughCamera.WorldToViewportPoint(center + camPose.rotation * Vector3.right * palm, camPose);
                 hx = vc.x * width;
                 hy = (1f - vc.y) * height;
                 size = Mathf.Abs(vs.x - vc.x) * width; // chieu dai long ban tay khong bi nghieng lam ngan
                 valid = hx > -width && hx < 2f * width && hy > -height && hy < 2f * height;
+                int hs = frameId % PoseHistory;
+                _hintCenters[hs] = center;
+                _hintPalms[hs] = palm;
             }
         }
+        _hintOk[frameId % PoseHistory] = valid;
 
         _header[0] = (byte)'G'; _header[1] = (byte)'L'; _header[2] = (byte)'V'; _header[3] = (byte)'1';
         WriteBigEndian(_header, 4, (uint)frameId);
@@ -160,6 +199,7 @@ public class GloveLiveStreamer : MonoBehaviour
     private void Awake()
     {
         var gloveHand = FindAnyObjectByType<FingerUDPReceiver>();
+        _gloveReceiver = gloveHand;
         if (gloveHand != null)
         {
             if (_gloveHandVisual == null) _gloveHandVisual = gloveHand.GetComponent<Oculus.Interaction.HandVisual>();
