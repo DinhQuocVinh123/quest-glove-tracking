@@ -378,6 +378,17 @@ def hint_offset(kpts, hint):
     return float(np.linalg.norm(center - np.array([hx, hy])) / max(hsize, 1.0))
 
 
+# Anh nhoe: ban ghi 03/10 14:22 -- 2 khung model "thay tay" tren anh san nha nhoe (quay dau) co do net 150-217,
+# trong khi khung tot cua 3 ban ghi thap nhat 302 (canh it hoa van, vd tuong tron, ~390 van khop tot).
+BLUR_THRESHOLD = 280.0
+
+
+def image_sharpness(frame):
+    """Do net ca anh: phuong sai Laplacian cua anh xam thu nho 320x240 (~1 ms). Anh nhoe chuyen dong -> thap."""
+    g = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (320, 240), interpolation=cv2.INTER_AREA)
+    return float(cv2.Laplacian(g, cv2.CV_32F).var())
+
+
 def is_valid_hand(kpts, scores, conf_thr=0.25, frame_shape=None):
     """Tra ve (hop_le, do_tin_cay_loi, ly_do_loai).
 
@@ -824,6 +835,9 @@ def main():
     parser.add_argument("--discovery-port", type=int, default=5008,
                         help="UDP port used to broadcast this PC's presence so the Quest finds it without a hardcoded IP")
     parser.add_argument("--udp-port", type=int, default=5005, help="Target UDP port on the Quest (must match FingerUDPReceiver's _port)")
+    parser.add_argument("--blur-thr", type=float, default=BLUR_THRESHOLD,
+                        help="Anh nhoe (quay dau nhanh) -> bo qua, khong chay model. Do net = phuong sai Laplacian cua ca "
+                             "anh thu nho 320x240. 0 = tat.")
     parser.add_argument("--conf-thr", type=float, default=0.15,
                         help="Min core-joint confidence to accept a detection. Lowered from 0.26: the model has never "
                              "seen this glove so its confidence sits near the threshold, and a cluttered background "
@@ -1050,6 +1064,12 @@ def main():
                     # Xoa moi khung, neu khong se hien ly do CU cua khung truoc.
                     reject_reason = ""
                     fallback_reason = ""
+
+                    # Anh nhoe vi quay dau nhanh: model van "thay tay" o cho khong co tay -> bo qua ca khung
+                    sharpness = image_sharpness(frame)
+                    if args.blur_thr > 0 and sharpness < args.blur_thr:
+                        candidate_boxes = []
+                        reject_reason = f"anh nhoe (do net {sharpness:.0f} < {args.blur_thr:.0f})"
 
                     for c_box in candidate_boxes:
                         bx1 = max(-pad, min(w + pad - 60, int(c_box[0])))
