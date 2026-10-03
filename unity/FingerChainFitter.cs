@@ -17,6 +17,7 @@ public sealed class FingerChainFitter
     private readonly Transform[] _bones;
     private readonly bool _isThumb;
     private readonly Quaternion[] _rest = new Quaternion[Bones];
+    private readonly Quaternion[] _straight = new Quaternion[Bones]; // xoay them de goc 0 = ngon THANG (xem StraightenFingers)
     private readonly Vector3[] _offset = new Vector3[Bones];   // khop ke tiep, trong he toa do cua xuong (chua nhan scale)
     private readonly Vector3[] _flexAxis = new Vector3[Bones]; // truc gap cua tung xuong (local)
     private readonly Vector3 _spreadAxis;                      // truc xoe cua xuong goc (local)
@@ -29,6 +30,11 @@ public sealed class FingerChainFitter
 
     /// <summary>Goc xoe ngang toi da cua 4 ngon (do). Ngon tro that xoe duoc ~20-30 do.</summary>
     public static float FingerSpreadLimit = 30f;
+
+    /// <summary>4 ngon: goc 0 = ngon THANG (khop giua + khop dau nam tren duong thang dot goc). Tu the nghi cua
+    /// rig XRHand KHONG thang: dot cuoi ngon tro venh nguoc ~8 do + lech ngang ~3 do -> khi bo giai cho "goc 0 =
+    /// thang" thi dau ngon ao venh len, cong them chut khop giua thanh hinh chu S. Doc lai luc tao (tat = cach cu).</summary>
+    public static bool StraightenFingers = true;
 
     /// <param name="bones">3 dot xuong tu goc ra ngoai, O TU THE NGHI (luc Awake).</param>
     /// <param name="tip">Diem dau ngon (con cua dot cuoi).</param>
@@ -45,7 +51,12 @@ public sealed class FingerChainFitter
             _rest[j] = bones[j].localRotation;
             Transform next = j + 1 < Bones ? bones[j + 1] : tip;
             _offset[j] = Quaternion.Inverse(bones[j].rotation) * (next.position - bones[j].position) / scale;
+            _straight[j] = Quaternion.identity;
         }
+        // Nan thang: dot j huong theo dung huong dot j-1 (xoay nho nhat, trong he toa do cua dot j)
+        if (!isThumb && StraightenFingers)
+            for (int j = 1; j < Bones; j++)
+                _straight[j] = Quaternion.FromToRotation(_offset[j], Quaternion.Inverse(_rest[j]) * _offset[j - 1]);
 
         // Tu tim truc gap cua tung dot (khong can biet truoc rig dung truc X hay Y):
         //  - 4 ngon: truc nao xoay duong lam dau ngon di XUONG phia long ban tay nhieu nhat.
@@ -59,7 +70,7 @@ public sealed class FingerChainFitter
         Vector3 along = _offset[0].normalized;
         _spreadAxis = Vector3.Cross(along, _flexAxis[0]).normalized;
 
-        // Gioi han goc khop (do, so voi tu the nghi cua rig). Ngon cai hep theo tam van dong that
+        // Gioi han goc khop (do; 4 ngon: so voi ngon THANG, ngon cai: so voi tu the nghi cua rig). Ngon cai hep theo tam van dong that
         // (khop dot dau chi be nguoc duoc chut it).
         _min = isThumb ? new[] { -35f, -20f, -10f, -10f } : new[] { -FingerSpreadLimit, -15f, 0f, -5f };
         _max = isThumb ? new[] { 35f, 45f, 70f, 85f } : new[] { FingerSpreadLimit, 95f, 110f, 90f };
@@ -84,7 +95,7 @@ public sealed class FingerChainFitter
     {
         for (int j = 0; j < Bones; j++)
         {
-            Quaternion posed = _rest[j] * LocalDelta(j, _angles);
+            Quaternion posed = _rest[j] * _straight[j] * LocalDelta(j, _angles);
             _bones[j].localRotation = blend >= 1f ? posed : Quaternion.Slerp(_rest[j], posed, blend);
         }
     }
@@ -99,7 +110,7 @@ public sealed class FingerChainFitter
         joints[0] = root;
         for (int j = 0; j < Bones; j++)
         {
-            rot = rot * _rest[j] * LocalDelta(j, a);
+            rot = rot * _rest[j] * _straight[j] * LocalDelta(j, a);
             joints[j + 1] = joints[j] + rot * (_offset[j] * scale);
         }
     }
@@ -163,7 +174,7 @@ public sealed class FingerChainFitter
         Vector3 p = _bones[0].position;
         for (int j = 0; j < Bones; j++)
         {
-            rot = rot * _rest[j] * (j == bone ? delta : Quaternion.identity);
+            rot = rot * _rest[j] * _straight[j] * (j == bone ? delta : Quaternion.identity);
             p += rot * (_offset[j] * scale);
         }
         return p;
