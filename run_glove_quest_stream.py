@@ -199,6 +199,10 @@ def build_pixel_payload(kpts, scores, w, h):
 FINGER_POINT_CONF_THR = 0.12    # do tin cay toi thieu cua tung diem tren ngon cai/tro
 SEG_MIN_RATIO = 0.06            # 1 dot ngan nhat = 6% chieu dai long ban tay
 SEG_MAX_RATIO = 1.00            # 1 dot dai nhat = 100% chieu dai long ban tay
+# Dot NGAN chi la loi khi model khong chac: ngon CHIA VAO/RA camera thi dot giua + dot cuoi tren anh co lai con
+# ~5% long ban tay -- tu the hop le. Ban ghi 03/10 13:44: 192 khung ngon tro chia ra xa bi loai oan (diem tin
+# cay p5 0.80); khung model roi that (02/10) dot ngan co tin cay ~0.2.
+SHORT_SEG_MIN_CONF = 0.5
 FINGER_MIN_RATIO = 0.35         # ca ngon ngan nhat = 35% long ban tay
 FINGER_MAX_RATIO = 2.00         # ca ngon dai nhat = 200% long ban tay
 MAX_JUMP_RATIO = 1.20           # 1 diem khong the nhay qua 120% long ban tay trong 1 khung
@@ -243,7 +247,8 @@ def is_pose_plausible(kpts, scores, prev_kpts=None, bad_points=None):
         for j in range(3):
             seg = float(np.linalg.norm(kpts[base + j + 1] - kpts[base + j]))
             total += seg
-            if seg < SEG_MIN_RATIO * palm_len or seg > SEG_MAX_RATIO * palm_len:
+            too_short = seg < SEG_MIN_RATIO * palm_len and min(scores[base + j], scores[base + j + 1]) < SHORT_SEG_MIN_CONF
+            if too_short or seg > SEG_MAX_RATIO * palm_len:
                 flagged.append(base + j + 1)
         if flagged and (bad_points is None or len(flagged) > 1):
             return False, f"dot {flagged[0] - base - 1} ngon {name} dai bat thuong"
