@@ -127,6 +127,15 @@ twice per frame) and the back-of-hand tile detector, which Unity no longer uses.
 with recorded frames streamed at the headset's 18 fps: 9.9 → 16.9 processed frames/s,
 send-to-result latency 119 → 65 ms. `--flip` and `--dorsal` turn them back on.
 
+**Motion blur:** frames blurred by a fast head turn are skipped before the model runs
+(the model could "find" a hand in a smeared view of the floor). Sharpness = variance of the
+Laplacian on a 320×240 grey copy (~1 ms); threshold 280 (`--blur-thr`, 0 = off), set from
+three recordings: false detections 150–218, lowest good frame 302.
+
+**Windows shortcut:** double-click `Chay tracking.bat` (or `Chay tracking - ghi lai.bat` to
+also `--record`). They `cd` to their own folder and use `mmpose_venv\Scripts\python.exe`, so
+there is no need to activate the venv or type the checkpoint path.
+
 **If it won't connect:** the headset and PC must be on the same network, and that
 network must allow devices to talk to each other directly. Corporate networks often
 block this — a phone hotspot is the most reliable option.
