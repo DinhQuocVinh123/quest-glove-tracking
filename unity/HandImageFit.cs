@@ -19,7 +19,7 @@ public sealed class HandImageFit
 {
     public const int Points = 9; // 0 co tay, 1-4 ngon cai (goc -> dau), 5-8 ngon tro
     private const int NP = 14;   // [0..2] dich co tay (cm), [3..5] xoay co tay (do, vector quay the gioi), [6..9] cai, [10..13] tro
-    private const int NR = 2 * Points + 1 + 3 + 3 + 3 + 8 + 6 + 8 + 3 + 3; // ... + 6 chong be nguoc, 8 dang tay hoc tu tay tran, 3 cum luc giac, 3 pinch
+    private const int NR = 2 * Points + 1 + 3 + 3 + 3 + 8 + 6 + 8 + 2 + 3 + 3; // ... + 6 chong be nguoc, 8 dang tay hoc tu tay tran, 2 cong an, 3 cum luc giac, 3 pinch
 
     // Trong so (don vi: sai so anh tinh bang CHIEU DAI LONG BAN TAY o chieu sau cua tay).
     // Sai 10 pixel ~ 0.05. Static de chinh thu tren ban ghi.
@@ -56,21 +56,37 @@ public sealed class HandImageFit
     // 54% thoi gian khop goc gap hon khop giua 10 do, khop dau ~0.55 khop giua.
     // Mo hinh: goc trung binh noi suy theo muc pinch (mo -> chum) + ma tran tuong quan 8 goc (cai, tro: xoe/goc/
     // giua/dau). Phat = khoang cach Mahalanobis -> cac khop di cung nhau nhu tay that.
+    // 03/10: hoc lai sau khi FingerChainFitter.StraightenFingers (goc 0 = ngon THANG): khop dau ngon tro mo tay
+    // 9.4 -> 1.0 do, pinch 32.9 -> 24.6 do (truoc do so voi dot cuoi venh nguoc ~8 do cua rig).
+    // CONG AN cua ngon tro: phan gap 3D ma anh KHONG thay (ngon cong ve phia / ra xa camera trong anh van thang).
+    // Mot camera khong phan biet duoc -> bo giai co the them cong an ma van khop anh; nhin tu mat (khac goc camera)
+    // thanh ngon cong queo. Phat (gap 3D - gap tren anh) o khop giua + khop dau, moi do.
+    // 03/10 (co cong StraightOnImage), ban ghi 13:44 tay phai->trai gan/xa/pinch: cong an DIP p90 10-13 -> 4-5 do,
+    // gap DIP p90 28-32 -> 21 do, sai so anh khong doi, khe 2 dau ngon khi pinch 1.9 -> 2.0 cm. Synthetic: huong co tay
+    // trung vi 2-6 -> 4-5 do (khong cong: 6 do). 0.032 chi tot them chut, giat hon o ban ghi voi xa.
+    public static float HiddenBendWeight = 0.016f;
+    // Chi phat khi ANH cho thay ngon thang: dot giua + dot cuoi (diem 6-7-8) gay it va KHONG bi co ngan (ngon cong
+    // ve phia camera trong anh ngan di). Phat deu tay lam sai ngon cong that theo chieu sau: bai Synthetic (ngon cong
+    // kieu pinch, co dap an) huong co tay lech 2 -> 6 do. Ban ghi 03/10: nhin ngang gay tren anh p90 7-9 do, dai >= 0.32
+    // long ban tay; chia doc truc nhin dai 0.11-0.22.
+    public static float StraightBendFull = 8f, StraightBendZero = 15f;      // gay tren anh (do) tai diem 7
+    public static float StraightLenZero = 0.22f, StraightLenFull = 0.30f;   // (|6-7| + |7-8|) / |0-5| tren anh
     public static float PosePriorWeight = 0.02f;     // moi 1 do lech chuan (sai 2 do lech chuan ~ sai anh 0.04 long ban tay)
-    private static readonly float[] PoseMeanOpen = { 0.8791f, 4.2680f, 27.0197f, 0.9191f, 1.1209f, 11.4430f, 18.2154f, 9.4402f };
-    private static readonly float[] PoseMeanPinch = { 7.0680f, 11.1249f, 38.0017f, 15.8167f, 2.0609f, 18.5585f, 46.6866f, 32.8668f };
+    private static readonly float[] PoseMeanOpen = { 0.8791f, 4.2680f, 27.0197f, 0.9191f, 2.7536f, 11.5433f, 18.6156f, 1.0288f };
+    private static readonly float[] PoseMeanPinch = { 7.0680f, 11.1249f, 38.0017f, 15.8167f, 2.2528f, 18.5744f, 47.1248f, 24.5913f };
     private static readonly float[,] PoseWhiten = // nghich dao Cholesky cua ma tran hiep phuong sai (don vi: 1/do)
     {
         { 0.0670f, 0.0000f, 0.0000f, 0.0000f, 0.0000f, 0.0000f, 0.0000f, 0.0000f },
         { 0.0236f, 0.1975f, 0.0000f, 0.0000f, 0.0000f, 0.0000f, 0.0000f, 0.0000f },
         { -0.0074f, 0.0392f, 0.1342f, 0.0000f, 0.0000f, 0.0000f, 0.0000f, 0.0000f },
         { -0.0255f, -0.0233f, -0.1364f, 0.1442f, 0.0000f, 0.0000f, 0.0000f, 0.0000f },
-        { 0.0237f, -0.0501f, 0.0263f, -0.0159f, 0.2655f, 0.0000f, 0.0000f, 0.0000f },
-        { 0.0501f, -0.0141f, 0.0083f, 0.0126f, -0.0492f, 0.0910f, 0.0000f, 0.0000f },
-        { 0.0347f, -0.0076f, -0.0221f, -0.0140f, 0.0272f, 0.0042f, 0.1164f, 0.0000f },
-        { -0.0626f, -0.0322f, 0.0107f, -0.0197f, 0.0019f, 0.0027f, -0.1726f, 0.3130f },
+        { 0.0238f, -0.0537f, 0.0245f, -0.0116f, 0.2629f, 0.0000f, 0.0000f, 0.0000f },
+        { 0.0496f, -0.0119f, 0.0081f, 0.0123f, -0.0563f, 0.0913f, 0.0000f, 0.0000f },
+        { 0.0355f, -0.0108f, -0.0217f, -0.0143f, 0.0412f, 0.0032f, 0.1173f, 0.0000f },
+        { -0.0627f, -0.0315f, 0.0120f, -0.0200f, 0.0055f, 0.0025f, -0.1728f, 0.3121f },
     };
     private readonly float[] _poseDev = new float[8];
+    private Vector3 _indexMcpJoint; // khop goc ngon tro THAT (diem 5 tren anh lech khoi no, xem IndexMcpPointLocal)
 
     private readonly FingerChainFitter _thumb, _index;
     private Vector3 _thumbRootL, _indexRootL;                  // goc ngon trong he co tay (met, theo Scale)
@@ -120,6 +136,8 @@ public sealed class HandImageFit
     public float Depth { get; private set; }
     /// <summary>Cum luc giac dung trong lan giai vua roi: -1 khong biet, 0 khong thay, 1 thay.</summary>
     public int DorsalUsed => _dorsalState;
+    /// <summary>0..1: anh cho thay ngon tro thang ro rang den dau (xem StraightBendFull) -- he so cua phat cong an.</summary>
+    public float StraightOnImage { get; private set; }
 
     private int _nextSeed;
     private static readonly float[,] FingerSeeds =
@@ -271,6 +289,7 @@ public sealed class HandImageFit
         float gap = Vector2.Distance(_target[4], _target[8]) / Mathf.Max(palmOnImage, 1e-4f);
         Pinch = _weight[4] > 0f && _weight[8] > 0f
             ? Mathf.Clamp01((PinchFarOnImage - gap) / Mathf.Max(PinchFarOnImage - PinchNearOnImage, 1e-3f)) : 0f;
+        StraightOnImage = StraightGate(palmOnImage);
 
         warm &= HasSolution;
         _useDepthPrior = depthPrior > 0.05f;
@@ -445,6 +464,7 @@ public sealed class HandImageFit
         for (int k = 0; k < 4; k++) _a4[k] = x[10 + k];
         _index.JointsAt(_a4, p + r * _indexRootL, r * _indexParentL, _chain);
         for (int k = 0; k < 4; k++) _model[5 + k] = _chain[k];
+        _indexMcpJoint = _chain[0];
         _model[5] += r * (IndexMcpPointLocal * Scale);
     }
 
@@ -501,6 +521,10 @@ public sealed class HandImageFit
             for (int c = 0; c <= i; c++) w += PoseWhiten[i, c] * _poseDev[c];
             r[k++] = PosePriorWeight * w;
         }
+        // Cong an cua ngon tro (khop giua, khop dau)
+        float hw = HiddenBendWeight * StraightOnImage;
+        r[k++] = hw > 0f ? hw * HiddenBend(_indexMcpJoint, _model[6], _model[7]) : 0f;
+        r[k++] = hw > 0f ? hw * HiddenBend(_model[6], _model[7], _model[8]) : 0f;
 
         // Cum luc giac tren mu ban tay: thay -> tam cum ao trung tam cum tren anh (va mat cum khong
         // quay han ra sau); khong thay -> mat cum khong duoc quay ve camera
@@ -532,6 +556,34 @@ public sealed class HandImageFit
         float sum = 0f;
         for (int i = 0; i < NR; i++) sum += r[i] * r[i];
         return sum;
+    }
+
+    private float StraightGate(float palmOnImage)
+    {
+        if (_weight[6] <= 0f || _weight[7] <= 0f || _weight[8] <= 0f || palmOnImage < 1e-4f) return 0f;
+        Vector2 u = _target[7] - _target[6], w = _target[8] - _target[7];
+        float bend = Mathf.Abs(Mathf.Atan2(u.x * w.y - u.y * w.x, Vector2.Dot(u, w))) * Mathf.Rad2Deg;
+        float len = (u.magnitude + w.magnitude) / palmOnImage;
+        return Mathf.Clamp01((StraightBendZero - bend) / (StraightBendZero - StraightBendFull)) *
+               Mathf.Clamp01((len - StraightLenZero) / (StraightLenFull - StraightLenZero));
+    }
+
+    /// <summary>Goc gap 3D tai b (do) tru goc gap cua hinh chieu len anh -- phan gap camera khong thay.</summary>
+    private float HiddenBend(Vector3 a, Vector3 b, Vector3 c)
+    {
+        Vector3 u = b - a, w = c - b;
+        float bend3 = Mathf.Atan2(Vector3.Cross(u, w).magnitude, Vector3.Dot(u, w)) * Mathf.Rad2Deg;
+        Vector2 pa = Project(a), pb = Project(b), pc = Project(c);
+        Vector2 u2 = pb - pa, w2 = pc - pb;
+        float bend2 = Mathf.Abs(Mathf.Atan2(u2.x * w2.y - u2.y * w2.x, Vector2.Dot(u2, w2))) * Mathf.Rad2Deg;
+        return Mathf.Max(0f, bend3 - bend2);
+    }
+
+    private Vector2 Project(Vector3 world)
+    {
+        Vector3 c = _camInv * (world - _camPos);
+        float z = Mathf.Max(c.z, 0.02f);
+        return new Vector2(c.x / z, c.y / z);
     }
 
     private void ClampAngles(float[] x)
