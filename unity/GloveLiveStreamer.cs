@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using Meta.XR;
 using Unity.Collections;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 /// <summary>
 /// Biến thể "live" của GloveDatasetCollector: thay vì ghi từng mẫu training
@@ -93,10 +94,24 @@ public class GloveLiveStreamer : MonoBehaviour
     private readonly System.Threading.AutoResetEvent _frameReady = new System.Threading.AutoResetEvent(false);
     private volatile bool _workerRunning;
     private volatile bool _workerBusy;        // dang nen/gui khung truoc -> bo qua khung nay
+    private bool _readbackPending;            // dang doi GPU tra anh (AsyncGPUReadback) -> chua chup anh moi
+    private float _lastStatusTime = -999f, _readbackStartTime;
+    private int _readbackId;                  // anh GPU tra ve tre (sau khi da thoi doi) thi bo
     private volatile bool _connectionBroken;  // luong phu bao mat ket noi, luong chinh dong lai
-    private Color32[] _captureBuffer;         // luong chinh ghi, luong phu doc (khi _workerBusy)
     private Color32[] _flipBuffer;            // chi luong phu dung
-    private int _frameWidth, _frameHeight;
+
+    // 2 o anh xoay vong: luong phu nen/gui o nay trong khi GPU tra anh ke tiep vao o kia -> doc anh (1-3 khung)
+    // chong len thoi gian nen, van giu ~18 anh/giay. Chi 1 o: anh ve cham hon 1 chut la lo nhip gui, con 8-9 anh/giay
+    // (glove_diag 04/10 15:21, ban doc anh khong chan dau tien).
+    private sealed class FrameSlot
+    {
+        public Color32[] Pixels;
+        public readonly byte[] Header = new byte[24];
+        public int HeaderLength, Width, Height;
+    }
+    private readonly FrameSlot[] _slots = { new FrameSlot(), new FrameSlot() };
+    private volatile FrameSlot _workerSlot;   // o luong phu dang nen/gui
+    private FrameSlot _queuedSlot;            // o da co anh, cho luong phu ranh
     private float _mainThreadMs, _encodeMs, _sendMs; // do thoi gian tung buoc (hien trong status)
 
     // --- So thu tu anh + huong camera luc chup ---------------------------------
@@ -107,8 +122,7 @@ public class GloveLiveStreamer : MonoBehaviour
     private readonly int[] _poseIds = new int[PoseHistory];
     private readonly Pose[] _poses = new Pose[PoseHistory];
     private int _frameId;
-    private readonly byte[] _header = new byte[24];
-    private volatile int _headerLength; // 0 = khong gui phan dau (luong phu doc)
+    private readonly byte[] _header = new byte[24]; // BuildHeader ghi o day, roi chep sang o anh
 
     // Tam tay (khop goc ngon giua) + chieu dai long ban tay THEO QUEST luc chup tung anh -- chinh
     // la cho "goi y" gui Python (vung tim tay). ImageHandSolver lay chieu sau tam tay o day lam goi y.
@@ -255,8 +269,9 @@ public class GloveLiveStreamer : MonoBehaviour
             if (!_workerRunning) break;
             try
             {
-                int w = _frameWidth, h = _frameHeight;
-                Color32[] pixels = _captureBuffer;
+                FrameSlot slot = _workerSlot;
+                int w = slot.Width, h = slot.Height;
+                Color32[] pixels = slot.Pixels;
                 sw.Restart();
                 if (_imageIsBottomUp)
                 {
@@ -272,7 +287,7 @@ public class GloveLiveStreamer : MonoBehaviour
                 NetworkStream stream = _stream;
                 if (stream != null)
                 {
-                    WriteFramed(stream, _header, _headerLength, jpg);
+                    WriteFramed(stream, slot.Header, slot.HeaderLength, jpg);
                     _sentCount++;
                     _lastStatus = "OK";
                 }
@@ -315,13 +330,27 @@ public class GloveLiveStreamer : MonoBehaviour
             UpdateStatusText();
             return;
         }
+        // Anh da doc xong ma luc do luong phu con ban -> giao ngay khi ranh
+        if (_queuedSlot != null && !_workerBusy)
+        {
+            FrameSlot queued = _queuedSlot;
+            _queuedSlot = null;
+            Dispatch(queued);
+        }
         if (Time.time - _lastSendTime < _sendIntervalSeconds)
         {
             return;
         }
-        _lastSendTime = Time.time;
-        TrySendFrame();
+        // Chi tinh la da gui khi THUC SU chup duoc anh moi -- con ban thi thu lai khung sau, khong bo ca nhip 0.05 s
+        if (TrySendFrame()) _lastSendTime = Time.time;
         UpdateStatusText();
+    }
+
+    private void Dispatch(FrameSlot slot)
+    {
+        _workerSlot = slot;
+        _workerBusy = true;
+        _frameReady.Set();
     }
 
     /// <summary>Doc tin hieu "may chu o day" ma may tinh phat ra (dinh dang
@@ -372,7 +401,8 @@ public class GloveLiveStreamer : MonoBehaviour
         }
     }
 
-    private void TrySendFrame()
+    /// <summary>Chup 1 anh moi (yeu cau GPU tra anh, khong chan). true = da chup -- tinh vao nhip gui.</summary>
+    private bool TrySendFrame()
     {
         if (_connectionBroken && !_workerBusy)
         {
@@ -385,58 +415,88 @@ public class GloveLiveStreamer : MonoBehaviour
             // giới hạn 1 lần mỗi giây để không làm nghẽn Update().
             if (Time.time - _lastConnectAttemptTime < 1.0f)
             {
-                return;
+                return false;
             }
             _lastConnectAttemptTime = Time.time;
             if (!TryConnect())
             {
-                return;
+                return false;
             }
         }
 
-        // Luong phu con dang nen/gui khung truoc -> bo qua, khong don viec.
-        if (_workerBusy) return;
+        // Anh truoc chua doc xong tu GPU, hoac da co 1 anh doi luong phu -> chua chup them (luong phu dang nen
+        // thi VAN chup: anh ve trong luc nen). GPU khong tra anh qua 1 giay (vd texture camera bi tao lai) -> thoi doi.
+        if (_readbackPending && Time.unscaledTime - _readbackStartTime > 1f) _readbackPending = false;
+        if (_readbackPending || _queuedSlot != null) return false;
 
         try
         {
             var t0 = System.Diagnostics.Stopwatch.StartNew();
             var res = _passthroughCamera.CurrentResolution;
-            var colors = _passthroughCamera.GetColors();
-            if (colors.Length == 0)
-            {
-                return;
-            }
-            if (_captureBuffer == null || _captureBuffer.Length != colors.Length) _captureBuffer = new Color32[colors.Length];
-            colors.CopyTo(_captureBuffer); // chep vao bo dem dung lai (khong tao mang moi moi lan)
-            _frameWidth = res.x;
-            _frameHeight = res.y;
+            Texture tex = _passthroughCamera.GetTexture();
+            if (tex == null || res.x <= 0 || res.y <= 0) return false;
 
             // So thu tu + huong camera luc chup (de dung ngon theo truc camera),
-            // va goi y vi tri tay cho Python.
+            // va goi y vi tri tay cho Python -- ghi NGAY luc chup, anh ve sau 1-3 khung.
             _frameId++;
             Pose camPose = _passthroughCamera.GetCameraPose();
             int slot = _frameId % PoseHistory;
             _poseIds[slot] = _frameId;
             _poses[slot] = camPose;
+            byte[] header = null;
             if (_sendHandHint)
             {
                 BuildHeader(_frameId, camPose, res.x, res.y);
-                _headerLength = _header.Length;
+                header = (byte[])_header.Clone();
             }
-            else
-            {
-                _headerLength = 0;
-            }
-            _mainThreadMs = (float)t0.Elapsed.TotalMilliseconds;
 
-            _workerBusy = true;
-            _frameReady.Set();
+            // Doc anh tu GPU KHONG CHAN: truoc day GetColors() bat luong chinh doi GPU (WaitForCompletion) moi lan gui
+            // -> khung do bi lo gio. glove_diag 03/10 18:34: khung co ket qua moi (trung nhip voi khung gui) rot 43%,
+            // cac khung khac ~10%; ca app chi 62-65/72 khung/giay. Sau khi doi: 72/72, khong rot khung (04/10 15:21).
+            int w = res.x, h = res.y;
+            _readbackPending = true;
+            _readbackStartTime = Time.unscaledTime;
+            int id = ++_readbackId;
+            // Dinh dang goc cua texture (R8G8B8A8, sRGB) -- y het GetColors(); xin doi dinh dang co the bi GPU giai sRGB -> anh toi.
+            AsyncGPUReadback.Request(tex, 0, req => { if (id == _readbackId) OnReadback(req, w, h, header); });
+            _mainThreadMs = (float)t0.Elapsed.TotalMilliseconds;
+            return true;
         }
         catch (Exception e)
         {
+            _readbackPending = false;
             _failCount++;
             _lastStatus = "Loi doc camera: " + e.Message;
+            return false;
         }
+    }
+
+    /// <summary>Anh da doc xong tu GPU (luong chinh, 1-3 khung sau Request): chep vao o anh luong phu KHONG dung,
+    /// roi giao ngay (luong phu ranh) hoac de doi (Update giao khi ranh). Phan dau goi tin ghi tu luc chup.</summary>
+    private void OnReadback(AsyncGPUReadbackRequest req, int w, int h, byte[] header)
+    {
+        _readbackPending = false;
+        if (!isActiveAndEnabled || !_workerRunning) return;
+        if (req.hasError)
+        {
+            _failCount++;
+            _lastStatus = "Loi doc anh GPU";
+            return;
+        }
+        var t0 = System.Diagnostics.Stopwatch.StartNew();
+        var colors = req.GetData<Color32>();
+        if (colors.Length != w * h) return;
+        FrameSlot slot = _workerBusy && _workerSlot == _slots[0] ? _slots[1] : _slots[0];
+        if (_workerBusy && _workerSlot == slot) slot = slot == _slots[0] ? _slots[1] : _slots[0];
+        if (slot.Pixels == null || slot.Pixels.Length != colors.Length) slot.Pixels = new Color32[colors.Length];
+        colors.CopyTo(slot.Pixels); // chep vao bo dem dung lai (khong tao mang moi moi lan)
+        slot.Width = w;
+        slot.Height = h;
+        slot.HeaderLength = header != null ? header.Length : 0;
+        if (header != null) Array.Copy(header, slot.Header, header.Length);
+        _mainThreadMs += (float)t0.Elapsed.TotalMilliseconds;
+        if (_workerBusy) _queuedSlot = slot;
+        else Dispatch(slot);
     }
 
     private bool TryConnect()
@@ -502,7 +562,9 @@ public class GloveLiveStreamer : MonoBehaviour
 
     private void UpdateStatusText()
     {
-        if (_statusText == null) return;
+        // Dat lai chu TextMeshPro = dung lai ca mesh chu -> chi 2 lan/giay (truoc day moi lan gui, 18 lan/giay)
+        if (_statusText == null || Time.unscaledTime - _lastStatusTime < 0.5f) return;
+        _lastStatusTime = Time.unscaledTime;
         string target = (_useAutoDiscovery && !string.IsNullOrEmpty(_discoveredIp))
             ? $"{_discoveredIp}:{_discoveredPort} (tu tim)"
             : (_useAutoDiscovery ? "dang do tim..." : $"{_pcIpAddress}:{_pcPort}");

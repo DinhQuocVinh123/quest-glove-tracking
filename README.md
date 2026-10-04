@@ -55,6 +55,9 @@ Copy these from `unity/` into your project's `Assets/Scripts/`:
 | `HandImageFit.cs` | The solver itself: each point becomes a ray from the camera at capture time; solves wrist pose + 8 finger angles |
 | `FingerChainFitter.cs` | Finger kinematics (joint axes, limits) used by the solver |
 | `HandFingerRig.cs` | Finds the finger bones by their `XRHand_*` names |
+| `SquishyPinchable.cs` | Soft ball you can pinch: symmetric dents on a stable grip axis, slides so both fingers reach comfortably (`FingerUDPReceiver` reads it to know when the hand is holding something) |
+| `PhysicsPinchGrabbable.cs` | Rigid physics object (e.g. a cube) picked up by pinching |
+| `FingertipSurfaceConstraint.cs` | Keeps the virtual fingers on the object surface instead of inside it; while pinching the ball, places the finger pads in the dents (put it on the hand's `HandVisual` object) |
 
 Optional:
 - `GloveDatasetCollector.cs` — capture training data.
@@ -126,6 +129,10 @@ longer slows tracking down.
 twice per frame) and the back-of-hand tile detector, which Unity no longer uses. Measured
 with recorded frames streamed at the headset's 18 fps: 9.9 → 16.9 processed frames/s,
 send-to-result latency 119 → 65 ms. `--flip` and `--dorsal` turn them back on.
+
+**Raw points:** the script sends the model's raw points; Unity (`ImageHandSolver`) does all
+the smoothing after fitting the hand. Smoothing in both places stacked up: the fingers lagged
+~220 ms behind the real hand. `--smooth-send` restores the old Python-side smoothing.
 
 **Motion blur:** frames blurred by a fast head turn are skipped before the model runs
 (the model could "find" a hand in a smeared view of the floor). Sharpness = variance of the

@@ -879,6 +879,10 @@ def main():
         help="Tim cum luc giac tren mu ban tay (18 ms/anh) va gui cho Unity. Mac dinh TAT tu 02/10: "
              "Unity da tat dung tin hieu nay (ImageHandSolver._useDorsalTiles).")
     parser.add_argument(
+        "--smooth-send", action="store_true",
+        help="Gui cho Unity diem DA LAM MUOT (OneEuro) thay vi diem tho. Mac dinh TAT tu 03/10: Unity tu loc "
+             "(ImageHandSolver, One-Euro sau khi dung tay); loc them o day lam tay ao tre ~20 ms (co tay) den ~130 ms (ngon).")
+    parser.add_argument(
         "--protocol",
         action="store_true",
         help="Thu du lieu theo KICH BAN co san (xoe tay mu/long, lat tay, nam, pinch...), co tieng bip bao "
@@ -913,7 +917,8 @@ def main():
     model = init_model(CONFIG_FILE, CHECKPOINT_FILE, device=args.device)
     if not args.flip:
         model.test_cfg["flip_test"] = False  # config bat san; tat = nhanh gap doi (xem --flip)
-    print(f"Flip test: {'BAT' if args.flip else 'tat'} | Cum luc giac mu tay: {'BAT' if args.dorsal else 'tat'}")
+    print(f"Flip test: {'BAT' if args.flip else 'tat'} | Cum luc giac mu tay: {'BAT' if args.dorsal else 'tat'} | "
+          f"Gui diem: {'da lam muot' if args.smooth_send else 'tho (Unity tu loc)'}")
 
     dummy_img = np.zeros((720, 1280, 3), dtype=np.uint8)
     dummy_box = np.array([[400, 200, 880, 680]])
@@ -1183,7 +1188,8 @@ def main():
                         send_scores = np.array(best_scores, dtype=float)
                         for i in bad_points:
                             send_scores[i] = 0.0
-                        pv, pc = build_pixel_payload(smoothed_kpts, send_scores, w, h)
+                        # Diem tho (mac dinh): Unity tu loc sau khi dung tay -- loc 2 lan = tre gap doi
+                        pv, pc = build_pixel_payload(smoothed_kpts if args.smooth_send else best_kpts, send_scores, w, h)
                         msg = f"valid:1,fid:{frame_fid},pv:{pv},pc:{pc}"
                         if dorsal_ok:
                             msg += f",dv:{dorsal_x / w:.4f}|{dorsal_y / h:.4f},da:{dorsal_area:.3f}"

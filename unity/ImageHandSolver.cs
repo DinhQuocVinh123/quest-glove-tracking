@@ -10,8 +10,43 @@ using UnityEngine;
 /// </summary>
 public sealed class ImageHandSolver : MonoBehaviour
 {
-    [Tooltip("Thoi gian truot muot tu ket qua cu sang ket qua moi (giay). Anh den 8-9 lan/giay (~0.11 s/anh).")]
-    [SerializeField] private float _displaySeconds = 0.06f;
+    [Tooltip("Moi tang truot muot (co 2 tang noi tiep, giay) tu ket qua da loc sang khung hinh -- de tay chay DEU giua 2 anh " +
+             "(18 anh/giay), phan chong rung do bo loc One-Euro ben duoi lo. 1 tang 0.025 (ban 03/10 17:00) don chuyen dong vao " +
+             "1-2 khung sau moi anh -> giat khi nhac vat. Truoc 03/10: 1 tang 0.06 + loc o Python (tre ~115 ms).")]
+    [SerializeField] private float _displaySeconds = 0.02f;
+    [Header("Loc One-Euro (moi lan giai): tay dung yen -> loc manh, tay chay -> bam nhanh")]
+    [Tooltip("Tan so cat khi tay dung yen (Hz). Nho = muot hon nhung tre hon.")]
+    [SerializeField] private float _minCutoff = 0.7f;
+    [Tooltip("Tan so cat tang them theo toc do co tay (Hz moi m/s).")]
+    [SerializeField] private float _betaPosition = 80f;
+    [Tooltip("Tan so cat tang them theo toc do xoay co tay (Hz moi do/s).")]
+    [SerializeField] private float _betaRotation = 0.1f;
+    [Tooltip("Tan so cat tang them theo toc do gap khop ngon (Hz moi do/s), tinh rieng tung khop.")]
+    [SerializeField] private float _betaAngle = 0.05f;
+    [Tooltip("Tan so cat khi uoc luong toc do (Hz).")]
+    [SerializeField] private float _speedCutoff = 1f;
+    [Tooltip("Giua 2 anh, day vi tri co tay di tiep theo van toc bay nhieu phan (0 = dung yen cho anh moi). " +
+             "1 = di deu theo van toc -> bu lai phan tre cua 2 tang truot muot.")]
+    [SerializeField] private float _extrapolate = 1f;
+    [Tooltip("Nhu tren nhung cho huong co tay + goc ngon (de 1 thi rung xoay luc dung yen tang ro).")]
+    [SerializeField] private float _extrapolateRotation = 0.5f;
+    [Tooltip("Ngoai suy toi da bay nhieu giay sau lan giai cuoi (anh den ~0.056 s/anh).")]
+    [SerializeField] private float _maxExtrapolateSeconds = 0.06f;
+    [Header("Do tin cay tung ket qua (chong giat khi 2 ngon sap cham nhau)")]
+    [Tooltip("Sai so anh (theo long ban tay) duoi muc nay = tin han; tren _errBad = gan nhu bo. glove_diag 04/10 16:36: tay tu do " +
+             "TB 0.042, luc 2 ngon sap cham 0.147 -- co tay nhay 26-78 do, ngon cai 10-18 do moi lan, One-Euro tuong tay chay nhanh nen cho qua.")]
+    [SerializeField] private float _errGood = 0.07f;
+    [SerializeField] private float _errBad = 0.20f;
+    [Tooltip("Huong co tay nhay hon muc nay (do) so voi ket qua da loc ma ket qua ngay truoc KHONG xac nhan -> chi tin 20%.")]
+    [SerializeField] private float _jumpDegrees = 15f;
+    [Tooltip("2 ket qua lien tiep lech nhau duoi muc nay (do, cach nhau < 0.2 s) = xac nhan dong tac that (vd xoay tay nhanh).")]
+    [SerializeField] private float _confirmDegrees = 10f;
+    [Tooltip("Do tin cay trung binh cac diem cua 1 ngon (model Python) tu muc thap -> cao: duoi = giu nguyen dang ngon, tren = tin han. " +
+             "Luc 2 ngon sap cham, diem ngon cai chi 0.2-0.35 (nhin ro: 0.6-1.2).")]
+    [SerializeField] private float _confLow = 0.25f;
+    [SerializeField] private float _confHigh = 0.6f;
+    [Tooltip("Muc tin toi thieu moi ket qua (de khong dung han khi model mai khong chac).")]
+    [SerializeField] private float _minTrust = 0.03f;
     [Tooltip("Khi bo giai doi sang cach hieu khac (vd thoat khoi dang ngon gap sai), truot sang dang moi trong khoang nay (giay).")]
     [SerializeField] private float _switchSeconds = 0.3f;
     [Tooltip("Python mat tay: giu tu the cuoi bay lau (giay) roi moi tra ve tay Quest.")]
@@ -71,6 +106,23 @@ public sealed class ImageHandSolver : MonoBehaviour
     private int _seenSwitches;
     private float _slowUntil;
 
+    // Ket qua da loc One-Euro (cap nhat moi lan giai xong)
+    private Vector3 _fP;
+    private Quaternion _fR = Quaternion.identity;
+    private readonly float[] _fA = new float[8];
+    private float _fSpeedP, _fSpeedR;
+    private readonly float[] _fSpeedA = new float[8];
+    private Vector3 _fVel, _fAngVel;           // m/s, truc*do/s
+    private readonly float[] _fVelA = new float[8];
+    private float _fTime = -999f;
+    private Quaternion _rawPrevR = Quaternion.identity; // ket qua tho lan truoc (de xac nhan cu nhay)
+    private float _rawPrevTime = -999f;
+    // Tang truot giua (hien thi = 2 tang noi tiep)
+    private Vector3 _midP;
+    private Quaternion _midR = Quaternion.identity;
+    private readonly float[] _midA = new float[8];
+    private bool _hasFilter;
+
     // --- Chan doan (FingerUDPReceiver ghi vao glove_diag) ---
     public float Weight => _weight;
     public int SolvedFrameId { get; private set; }
@@ -81,6 +133,8 @@ public sealed class ImageHandSolver : MonoBehaviour
     public float Pinch => _fit != null ? _fit.Pinch : 0f;
     public int Switches => _fit != null ? _fit.Switches : 0;
     public float SolveMs { get; private set; }
+    /// <summary>Muc tin cua lan giai gan nhat (0..1) cho vi tri/huong co tay.</summary>
+    public float LastTrust { get; private set; } = 1f;
     public bool Ready => _fit != null;
     public int DorsalUsed => _fit != null ? _fit.DorsalUsed : -1;
     /// <summary>Kich thuoc tay gang ao hien tai (1 = khung xuong chuan, long ban tay ~9.9 cm).</summary>
@@ -129,11 +183,13 @@ public sealed class ImageHandSolver : MonoBehaviour
             _weight = Mathf.MoveTowards(_weight, fresh ? 1f : 0f, Time.deltaTime / Mathf.Max(_blendSeconds, 1e-3f));
             if (_fit.HasSolution)
             {
+                if (!_hasFilter) ResetFilter(Time.time);
                 if (!_hasDisp || _weight <= 0.001f)
                 {
-                    _dispP = _fit.Position;
-                    _dispR = _fit.Rotation;
-                    System.Array.Copy(_fit.Angles, _dispA, 8);
+                    _dispP = _midP = _fP;
+                    _dispR = _midR = _fR;
+                    System.Array.Copy(_fA, _dispA, 8);
+                    System.Array.Copy(_fA, _midA, 8);
                     _hasDisp = true;
                 }
                 else
@@ -144,11 +200,23 @@ public sealed class ImageHandSolver : MonoBehaviour
                         _seenSwitches = _fit.Switches;
                         _slowUntil = Time.time + _switchSeconds;
                     }
-                    float tau = Time.time < _slowUntil ? _switchSeconds * 0.5f : _displaySeconds;
+                    float tau = Time.time < _slowUntil ? _switchSeconds * 0.25f : _displaySeconds;
                     float a = 1f - Mathf.Exp(-Time.deltaTime / Mathf.Max(tau, 1e-3f));
-                    _dispP = Vector3.Lerp(_dispP, _fit.Position, a);
-                    _dispR = Quaternion.Slerp(_dispR, _fit.Rotation, a);
-                    for (int k = 0; k < 8; k++) _dispA[k] = Mathf.Lerp(_dispA[k], _fit.Angles[k], a);
+                    // Dich = ket qua da loc, day tiep theo van toc ke tu lan giai cuoi
+                    float ahead = Mathf.Clamp(Time.time - _fTime, 0f, _maxExtrapolateSeconds);
+                    float aheadR = _extrapolateRotation * ahead;
+                    Vector3 tgtP = _fP + _extrapolate * ahead * _fVel;
+                    Quaternion tgtR = Quaternion.AngleAxis(_fAngVel.magnitude * aheadR, _fAngVel.normalized) * _fR;
+                    // 2 tang truot noi tiep: van toc hien thi lien tuc (khong giat theo nhip anh)
+                    _midP = Vector3.Lerp(_midP, tgtP, a);
+                    _dispP = Vector3.Lerp(_dispP, _midP, a);
+                    _midR = Quaternion.Slerp(_midR, tgtR, a);
+                    _dispR = Quaternion.Slerp(_dispR, _midR, a);
+                    for (int k = 0; k < 8; k++)
+                    {
+                        _midA[k] = Mathf.Lerp(_midA[k], _fA[k] + aheadR * _fVelA[k], a);
+                        _dispA[k] = Mathf.Lerp(_dispA[k], _midA[k], a);
+                    }
                 }
             }
         }
@@ -250,7 +318,89 @@ public sealed class ImageHandSolver : MonoBehaviour
                              warm, dorsal, dorsalDir);
         SolveMs = (float)sw.Elapsed.TotalMilliseconds;
         if (!ok) return;
+        if (!_hasFilter || Time.time - _lastSolveTime > _holdSeconds) ResetFilter(Time.time, _hasFilter);
+        else FilterStep(Time.time);
         _lastSolveTime = Time.time;
         SolvedFrameId = fid;
+    }
+
+    /// <summary>Bat dau lai bo loc tu ket qua giai hien tai (lan dau, hoac sau khi mat tay lau).</summary>
+    /// <param name="keepUnsureFingers">Mat tay lau roi thay lai: ngon nao model khong chac thi GIU dang cu (tron theo do tin cay)
+    /// thay vi lay thang ket qua -- luc 2 ngon sap cham ket qua ve thua (cach nhau > 1 s), lay thang thi ngon cai nhay 20-80 do.</param>
+    private void ResetFilter(float now, bool keepUnsureFingers = false)
+    {
+        _fP = _fit.Position;
+        _fR = _fit.Rotation;
+        if (keepUnsureFingers)
+        {
+            float wT = ConfTrust(1, 4), wI = ConfTrust(5, 8);
+            for (int k = 0; k < 8; k++) _fA[k] = Mathf.Lerp(_fA[k], _fit.Angles[k], k < 4 ? wT : wI);
+        }
+        else System.Array.Copy(_fit.Angles, _fA, 8);
+        _rawPrevR = _fit.Rotation;
+        _rawPrevTime = now;
+        _fSpeedP = _fSpeedR = 0f;
+        System.Array.Clear(_fSpeedA, 0, 8);
+        _fVel = _fAngVel = Vector3.zero;
+        System.Array.Clear(_fVelA, 0, 8);
+        _fTime = now;
+        _hasFilter = true;
+    }
+
+    /// <summary>Loc One-Euro 1 buoc cho lan giai moi: tan so cat = _minCutoff + beta * toc do (da lam muot),
+    /// nen tay dung yen thi loc manh (it rung), tay chay thi gan nhu theo ngay (it tre).</summary>
+    private void FilterStep(float now)
+    {
+        float te = Mathf.Max(now - _fTime, 1e-3f);
+        float ad = OneEuroAlpha(te, _speedCutoff);
+        Vector3 p = _fit.Position;
+        Quaternion r = _fit.Rotation;
+
+        // Do tin cay ket qua nay: sai so anh, nhay huong dot ngot khong duoc xac nhan, do tin cay diem cua model.
+        float w = Mathf.Clamp01((_errBad - _fit.ImageError) / Mathf.Max(_errBad - _errGood, 1e-4f));
+        bool confirmed = Quaternion.Angle(r, _rawPrevR) < _confirmDegrees && now - _rawPrevTime < 0.2f;
+        if (Quaternion.Angle(r, _fR) > _jumpDegrees && !confirmed) w *= 0.2f;
+        float wFingers = w;
+        w *= Mathf.Max(ConfTrust(0, 8), 0.3f);
+        float wT = Mathf.Max(wFingers * ConfTrust(1, 4), _minTrust), wI = Mathf.Max(wFingers * ConfTrust(5, 8), _minTrust);
+        w = Mathf.Max(w, _minTrust);
+        _rawPrevR = r;
+        _rawPrevTime = now;
+        LastTrust = w;
+
+        _fSpeedP = Mathf.Lerp(_fSpeedP, Vector3.Distance(p, _fP) / te, ad * w);
+        _fSpeedR = Mathf.Lerp(_fSpeedR, Quaternion.Angle(r, _fR) / te, ad * w);
+        Vector3 newP = Vector3.Lerp(_fP, p, OneEuroAlpha(te, _minCutoff + _betaPosition * _fSpeedP) * w);
+        _fVel = Vector3.Lerp(_fVel, (newP - _fP) / te, 0.5f * w);
+        _fP = newP;
+        Quaternion newR = Quaternion.Slerp(_fR, r, OneEuroAlpha(te, _minCutoff + _betaRotation * _fSpeedR) * w);
+        (newR * Quaternion.Inverse(_fR)).ToAngleAxis(out float dAng, out Vector3 axis);
+        if (dAng > 180f) dAng -= 360f;
+        Vector3 angVel = float.IsFinite(axis.x) ? axis * (dAng / te) : Vector3.zero;
+        _fAngVel = Vector3.Lerp(_fAngVel, angVel, 0.5f * w);
+        _fR = newR;
+        for (int k = 0; k < 8; k++)
+        {
+            float x = _fit.Angles[k], wk = k < 4 ? wT : wI;
+            _fSpeedA[k] = Mathf.Lerp(_fSpeedA[k], Mathf.Abs(x - _fA[k]) / te, ad * wk);
+            float newA = Mathf.Lerp(_fA[k], x, OneEuroAlpha(te, _minCutoff + _betaAngle * _fSpeedA[k]) * wk);
+            _fVelA[k] = Mathf.Lerp(_fVelA[k], (newA - _fA[k]) / te, 0.5f * wk);
+            _fA[k] = newA;
+        }
+        _fTime = now;
+    }
+
+    /// <summary>Do tin cay (0..1) theo trung binh do tin cay cac diem anh [from..to] cua ket qua vua giai (model Python).</summary>
+    private float ConfTrust(int from, int to)
+    {
+        float sum = 0f;
+        for (int i = from; i <= to; i++) sum += _conf[i];
+        return Mathf.Clamp01((sum / (to - from + 1) - _confLow) / Mathf.Max(_confHigh - _confLow, 1e-4f));
+    }
+
+    private static float OneEuroAlpha(float te, float cutoff)
+    {
+        float r = 2f * Mathf.PI * cutoff * te;
+        return r / (r + 1f);
     }
 }

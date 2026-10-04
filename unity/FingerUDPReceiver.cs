@@ -88,6 +88,9 @@ public class FingerUDPReceiver : MonoBehaviour
     private bool _hasAligned;
 
     private System.IO.StreamWriter _diag;
+    private readonly System.Text.StringBuilder _diagLine = new System.Text.StringBuilder(1400); // dung lai moi khung
+    private GloveLiveStreamer _streamer;
+    private FingertipSurfaceConstraint _constraint;
 
     private void Awake()
     {
@@ -369,6 +372,10 @@ public class FingerUDPReceiver : MonoBehaviour
             head.Append(",dorsal,du,dv,da");
             for (int f = 0; f < NumLiveTrackedFingers; f++) for (int j = 0; j < 4; j++) head.Append($",a{f}_{j}");
             head.Append(",solv,sfid,serr,scost,sdepth,szprior,sswitch,sms,spinch,sdorsal,hscale");
+            // Hieu nang: do dai khung truoc (ms), luong chinh cua lan gui anh gan nhat, rang buoc ngon + bong (khung truoc)
+            head.Append(",dtms,streamms,conms,sqms");
+            // Muc tin ket qua anh gan nhat (ImageHandSolver) + trang thai kep bong cua tay nay (FingertipSurfaceConstraint.PinchStatus)
+            head.Append(",trust,pinchst");
             _diag.WriteLine(head.ToString());
             Debug.Log($"[FingerUDPReceiver] Ghi chan doan vao {path}", this);
         }
@@ -380,7 +387,8 @@ public class FingerUDPReceiver : MonoBehaviour
         Transform indexTip = _rig.indexDistal != null && _rig.indexDistal.childCount > 0 ? _rig.indexDistal.GetChild(0) : null;
         float tipGap = thumbTip != null && indexTip != null ? Vector3.Distance(thumbTip.position, indexTip.position) : -1f;
 
-        var sb = new System.Text.StringBuilder(1200);
+        var sb = _diagLine;
+        sb.Clear();
         sb.Append(Time.time.ToString("F4", inv)).Append(',').Append(Time.frameCount).Append(',')
           .Append(_packetThisFrame ? 1 : 0).Append(',').Append(_dataValid ? 1 : 0).Append(',')
           .Append(IsGrasping() ? 1 : 0).Append(',').Append(tipGap.ToString("F4", inv));
@@ -408,7 +416,15 @@ public class FingerUDPReceiver : MonoBehaviour
           .Append(',').Append((ok ? s.Pinch : 0f).ToString("F2", inv))
           .Append(',').Append(ok ? s.DorsalUsed : -1)
           .Append(',').Append((ok ? s.HandScale : 0f).ToString("F3", inv));
-        _diag.WriteLine(sb.ToString());
+        if (_streamer == null) _streamer = FindAnyObjectByType<GloveLiveStreamer>();
+        if (_constraint == null) _constraint = GetComponent<FingertipSurfaceConstraint>();
+        sb.Append(',').Append((Time.unscaledDeltaTime * 1000f).ToString("F1", inv))
+          .Append(',').Append((_streamer != null ? _streamer.LastTimingsMs.x : 0f).ToString("F2", inv))
+          .Append(',').Append(FingertipSurfaceConstraint.FrameMs.ToString("F2", inv))
+          .Append(',').Append(SquishyPinchable.FrameMs.ToString("F2", inv))
+          .Append(',').Append((ok ? s.LastTrust : 0f).ToString("F2", inv))
+          .Append(',').Append(_constraint != null ? _constraint.PinchStatus : -1);
+        _diag.WriteLine(sb);
         if (Time.frameCount % 72 == 0) _diag.Flush(); // khong mat du lieu neu ung dung bi tat ngang
     }
 }
